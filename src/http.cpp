@@ -427,7 +427,7 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         client->done.store(true);
         return;
     }
-    if (action != "/mjpg/stream") {
+    if (action != "/mjpg" && action != "/mjpg/stream") {
         (void)send_text(client->fd, 404, "Not Found", "text/plain", "Not found\n");
         client->done.store(true);
         return;

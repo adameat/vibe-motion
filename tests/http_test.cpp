@@ -36,6 +36,28 @@ static std::string get(std::uint16_t port, const std::string& path) {
     return response;
 }
 
+static std::string get_headers(std::uint16_t port, const std::string& path) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+    assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request =
+        "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    assert(::send(fd, request.data(), request.size(), 0) == static_cast<ssize_t>(request.size()));
+    std::string response;
+    char buffer[1024];
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
+        assert(count > 0);
+        response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    return response;
+}
+
 int main() {
     HttpServer server({"127.0.0.1", 0, 8, std::chrono::milliseconds(1000)},
                       [] { return "{\"ok\":true}"; });
@@ -60,6 +82,9 @@ int main() {
     assert(image.find("Content-Type: image/jpeg") != std::string::npos);
     const auto body = image.substr(image.find("\r\n\r\n") + 4);
     assert(std::vector<std::uint8_t>(body.begin(), body.end()) == jpeg);
+    const auto short_stream = get_headers(server.port(), "/7/mjpg");
+    assert(short_stream.find("200 OK") != std::string::npos);
+    assert(short_stream.find("multipart/x-mixed-replace") != std::string::npos);
     server.stop();
 
     std::cout << "http tests passed\n";
