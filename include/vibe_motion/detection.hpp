@@ -11,6 +11,7 @@ namespace vibe_motion {
 struct DetectionSettings {
     std::uint64_t threshold = 1500;
     std::uint8_t noise_level = 32;
+    bool noise_tune = true;
     int lightswitch_percent = 0;
     bool despeckle = true;
     bool threshold_tune = false;
@@ -31,6 +32,7 @@ struct DetectionResult {
     bool motion = false;
     bool lightswitch_suppressed = false;
     std::uint64_t effective_threshold = 0;
+    std::uint8_t effective_noise_level = 0;
     MotionRegion region{};
 };
 
@@ -51,6 +53,9 @@ class MotionDetector {
     std::vector<std::uint8_t> changed_;
     std::size_t active_mask_pixels_ = 0;
     double background_changes_ = 0.0;
+    double effective_noise_level_ = 0.0;
+    bool noise_estimate_initialized_ = false;
+    unsigned upward_noise_frames_ = 0;
 };
 
 } // namespace vibe_motion

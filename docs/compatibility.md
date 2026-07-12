@@ -10,8 +10,8 @@ is included or copied.
 | --- | --- |
 | Configuration | ordered `camera` includes, global inheritance, last value wins, quoted values, aliases, unknown-option diagnostics |
 | Sources | RTMP and RTSP, TCP transport option, input dictionary parameters, timeout and reconnect |
-| Detection | grayscale background difference, `noise_level`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
-| Event lifecycle | `event_gap`, compressed pre-capture ring, frame-counted post-capture, best event JPEG |
+| Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
+| Event lifecycle | `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
 | Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MPEG-4 timelapse, automatic parent directories |
 | Hooks | event start/end, picture save, movie start/end; asynchronous argv execution and exit logging |
 | HTTP | one global listener, read-only status, latest JPEG, per-camera multipart MJPEG |
@@ -28,8 +28,9 @@ is included or copied.
 
 ## Known fidelity limits
 
-- `threshold_tune` uses a bounded adaptive noise-floor estimate rather than
-  Motion's exact tuning implementation. Thresholds need clip-based calibration.
+- `noise_tune` uses a bounded sampled-median estimate with hysteresis, while
+  `threshold_tune` uses a bounded rolling changed-pixel estimate. Both are
+  behavior-compatible rather than exact copies of Motion's tuning routines.
 - `locate_motion_mode preview` with `locate_motion_style redbox` is rendered on
   best-event JPEGs. `text_*` overlays and HTTP `stream_preview_scale` are parsed
   but are not rendered/applied yet.

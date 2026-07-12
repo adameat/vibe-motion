@@ -152,6 +152,8 @@ struct WorkerStatus {
     std::uint64_t frames = 0;
     std::uint64_t reconnects = 0;
     std::uint64_t changed_pixels = 0;
+    std::uint64_t effective_threshold = 0;
+    std::uint8_t effective_noise_level = 0;
     std::uint64_t event_number = 0;
     std::string error;
 };
@@ -209,7 +211,7 @@ class CameraWorker {
                                     static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
         result.changed_pixels = static_cast<int>(std::min<std::uint64_t>(
             detection.changed_pixels, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-        result.noise_level = config_.noise_level;
+        result.noise_level = detection.effective_noise_level;
         result.filename = std::move(filename);
         result.file_type = std::move(type);
         result.frame_number = static_cast<std::uint64_t>(frame.sequence);
@@ -315,6 +317,7 @@ class CameraWorker {
         detection_settings.threshold_tune = config_.threshold_tune;
         detection_settings.noise_level =
             static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
+        detection_settings.noise_tune = config_.noise_tune;
         detection_settings.lightswitch_percent = config_.lightswitch_percent;
         detection_settings.despeckle = !config_.despeckle_filter.empty();
         MotionDetector detector(detection_settings);
@@ -431,17 +434,21 @@ class CameraWorker {
                 const bool warmed = std::chrono::steady_clock::now() >= warm_until;
                 const auto decision =
                     events.update(warmed && detection.motion, std::chrono::steady_clock::now());
-                if (movie.is_open() && !decision.event_started && decision.record_frame) {
+                const bool record_frame =
+                    decision.record_frame || (config_.movie_all_frames && events.active());
+                if (movie.is_open() && !decision.event_started && record_frame) {
                     std::string error;
                     if (!movie.write(sample.packet, &error)) {
                         Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                  ": movie write: ", redact_secrets(error));
                     }
                 }
-                record_live = decision.record_frame;
+                record_live = record_frame;
                 set_status([&](WorkerStatus& state) {
                     state.frames++;
                     state.changed_pixels = detection.changed_pixels;
+                    state.effective_threshold = detection.effective_threshold;
+                    state.effective_noise_level = detection.effective_noise_level;
                     state.event_active = events.active();
                     state.event_number = events.event_number();
                 });
@@ -457,6 +464,40 @@ class CameraWorker {
                     }
                     return plain_jpeg;
                 };
+
+                // Motion runs event actions before the periodic snapshot action.
+                // This ordering lets a snapshot on the trigger frame attach to
+                // the event that has just been announced to the hook scripts.
+                if (decision.event_started) {
+                    auto values = context(detection, frame, decision.event_number);
+                    hook(config_.on_event_start, values, frame.captured_at);
+                    if (config_.movie_output) {
+                        movie_path = output_path(config_.movie_filename,
+                                                 config_.movie_container == "mp4" ? ".mp4" : ".mkv",
+                                                 values, frame.captured_at);
+                        std::filesystem::create_directories(movie_path.parent_path());
+                        std::string error;
+                        if (movie.open(movie_path.string(), source.stream_info(), &error)) {
+                            values.filename = movie_path.string();
+                            values.file_type = "movie";
+                            hook(config_.on_movie_start, values, frame.captured_at);
+                            if (!movie.write_preroll(ring, &error)) {
+                                Logger::instance().write(
+                                    LogLevel::warning, "camera ", config_.camera_id,
+                                    ": movie preroll: ", redact_secrets(error));
+                            }
+                        } else {
+                            Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
+                                                     ": movie open: ", redact_secrets(error));
+                            movie_path.clear();
+                        }
+                    }
+                }
+                if (decision.event_ended) {
+                    finish_event(movie, movie_path, best_jpeg, best_frame, best_detection,
+                                 decision.event_number);
+                    record_live = false;
+                }
 
                 const auto epoch_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                                frame.captured_at.time_since_epoch())
@@ -505,31 +546,6 @@ class CameraWorker {
                     }
                 }
 
-                if (decision.event_started) {
-                    auto values = context(detection, frame, decision.event_number);
-                    hook(config_.on_event_start, values, frame.captured_at);
-                    if (config_.movie_output) {
-                        movie_path = output_path(config_.movie_filename,
-                                                 config_.movie_container == "mp4" ? ".mp4" : ".mkv",
-                                                 values, frame.captured_at);
-                        std::filesystem::create_directories(movie_path.parent_path());
-                        std::string error;
-                        if (movie.open(movie_path.string(), source.stream_info(), &error)) {
-                            if (!movie.write_preroll(ring, &error)) {
-                                Logger::instance().write(
-                                    LogLevel::warning, "camera ", config_.camera_id,
-                                    ": movie preroll: ", redact_secrets(error));
-                            }
-                            values.filename = movie_path.string();
-                            values.file_type = "movie";
-                            hook(config_.on_movie_start, values, frame.captured_at);
-                        } else {
-                            Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
-                                                     ": movie open: ", redact_secrets(error));
-                            movie_path.clear();
-                        }
-                    }
-                }
                 if (events.active() && (best_frame.captured_at.time_since_epoch().count() == 0 ||
                                         detection.changed_pixels > best_detection.changed_pixels)) {
                     best_jpeg.clear();
@@ -562,11 +578,6 @@ class CameraWorker {
                                        frame.captured_at);
                         last_http_publish = now;
                     }
-                }
-                if (decision.event_ended) {
-                    finish_event(movie, movie_path, best_jpeg, best_frame, best_detection,
-                                 decision.event_number);
-                    record_live = false;
                 }
             }
             source.close();
@@ -654,6 +665,8 @@ class Application::Impl {
                    << ",\"event_active\":" << (state.event_active ? "true" : "false")
                    << ",\"event\":" << state.event_number << ",\"frames\":" << state.frames
                    << ",\"changed_pixels\":" << state.changed_pixels
+                   << ",\"threshold\":" << state.effective_threshold
+                   << ",\"noise_level\":" << static_cast<unsigned>(state.effective_noise_level)
                    << ",\"reconnects\":" << state.reconnects << ",\"error\":\""
                    << json_escape(redact_secrets(state.error)) << "\"}";
         }

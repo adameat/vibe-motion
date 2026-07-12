@@ -60,6 +60,8 @@ int main() {
     assert(deployment.cameras.front().netcam_url.rfind("rtmp://", 0) == 0);
     assert(deployment.global.webcontrol_port == 8880);
     assert(deployment.global.camera_defaults.threshold_tune);
+    assert(deployment.global.camera_defaults.noise_tune);
+    assert(deployment.global.camera_defaults.movie_all_frames);
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
 
@@ -103,6 +105,13 @@ int main() {
         "# ignored\n; ignored too\ndaemon=yes\nfuture=value with spaces\n");
     assert(comments.global.daemon);
     assert(comments.global.unknown_options.at("future") == "value with spaces");
+
+    const Config noise =
+        ConfigParser().parse_string("noise_level 64\nnoise_tune off\nmovie_all_frames off\n");
+    assert(noise.global.camera_defaults.noise_level == 64);
+    assert(!noise.global.camera_defaults.noise_tune);
+    assert(!noise.global.camera_defaults.movie_all_frames);
+    assert(deployment.dump_effective().find("noise_tune on") != std::string::npos);
 
     expect_config_error([] { ConfigParser().parse_string("daemon maybe\n"); });
     expect_config_error([&] { load_config(fixtures / "invalid-main.conf"); });
