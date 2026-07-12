@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -40,13 +41,22 @@ int main() {
                       [] { return "{\"ok\":true}"; });
     server.start();
     assert(server.port() != 0);
-    const std::vector<std::uint8_t> jpeg{0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9};
-    server.publish("7", jpeg);
+    assert(!server.has_stream_clients("7"));
+    assert(!server.wants_jpeg("7"));
 
     const auto status = get(server.port(), "/7/status");
     assert(status.find("200 OK") != std::string::npos);
     assert(status.find("{\"ok\":true}") != std::string::npos);
-    const auto image = get(server.port(), "/7/static/stream/timestamp");
+    std::string image;
+    std::thread requester([&] { image = get(server.port(), "/7/static/stream/timestamp"); });
+    for (int attempt = 0; attempt < 100 && !server.wants_jpeg("7"); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    assert(server.wants_jpeg("7"));
+    const std::vector<std::uint8_t> jpeg{0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9};
+    server.publish("7", jpeg);
+    requester.join();
+    assert(!server.wants_jpeg("7"));
     assert(image.find("Content-Type: image/jpeg") != std::string::npos);
     const auto body = image.substr(image.find("\r\n\r\n") + 4);
     assert(std::vector<std::uint8_t>(body.begin(), body.end()) == jpeg);

@@ -5,6 +5,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
@@ -223,9 +224,13 @@ struct NetworkCameraSource::Impl {
     SwsContext* jpeg_scaler = nullptr;
     CodecPtr jpeg_encoder;
     FramePtr jpeg_frame;
+    GrayFrame gray_frame;
     int video_stream = -1;
     int output_width = 0;
     int output_height = 0;
+    AVRational input_time_base{0, 1};
+    std::int64_t next_analysis_timestamp = AV_NOPTS_VALUE;
+    std::chrono::steady_clock::time_point next_analysis_at{};
     std::int64_t sequence = 0;
     std::int64_t jpeg_sequence = 0;
     bool input_eof = false;
@@ -268,9 +273,39 @@ struct NetworkCameraSource::Impl {
         video_stream = -1;
         output_width = 0;
         output_height = 0;
+        input_time_base = AVRational{0, 1};
+        next_analysis_timestamp = AV_NOPTS_VALUE;
+        next_analysis_at = {};
         jpeg_sequence = 0;
         input_eof = false;
         stream = StreamInfo{};
+    }
+
+    bool should_analyze(const AVFrame* frame) {
+        if (config.analysis_framerate <= 0) {
+            return true;
+        }
+        if (frame->best_effort_timestamp != AV_NOPTS_VALUE && input_time_base.num > 0 &&
+            input_time_base.den > 0) {
+            const auto interval = std::max<std::int64_t>(
+                1, av_rescale_q(1, AVRational{1, config.analysis_framerate}, input_time_base));
+            const auto timestamp = frame->best_effort_timestamp;
+            if (next_analysis_timestamp == AV_NOPTS_VALUE ||
+                timestamp + interval * 2 < next_analysis_timestamp ||
+                timestamp >= next_analysis_timestamp) {
+                next_analysis_timestamp = timestamp + interval;
+                return true;
+            }
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto interval = std::chrono::microseconds(1000000 / config.analysis_framerate);
+        if (next_analysis_at.time_since_epoch().count() == 0 || now >= next_analysis_at) {
+            next_analysis_at = now + interval;
+            return true;
+        }
+        return false;
     }
 
     bool init_jpeg(std::string* error) {
@@ -366,24 +401,41 @@ struct NetworkCameraSource::Impl {
         return bytes;
     }
 
-    std::optional<GrayFrame> convert_gray(const AVFrame* source) {
-        GrayFrame result;
-        result.width = output_width;
-        result.height = output_height;
-        result.sequence = ++sequence;
-        result.captured_at = std::chrono::system_clock::now();
-        result.pixels.resize(static_cast<std::size_t>(output_width) *
-                             static_cast<std::size_t>(output_height));
-        std::uint8_t* destination[] = {result.pixels.data(), nullptr, nullptr, nullptr};
+    const GrayFrame* convert_gray(const AVFrame* source) {
+        gray_frame.width = output_width;
+        gray_frame.height = output_height;
+        gray_frame.sequence = ++sequence;
+        gray_frame.captured_at = std::chrono::system_clock::now();
+        gray_frame.pixels.resize(static_cast<std::size_t>(output_width) *
+                                 static_cast<std::size_t>(output_height));
+        const auto pixel_format = static_cast<AVPixelFormat>(source->format);
+        const bool direct_luma =
+            pixel_format == AV_PIX_FMT_GRAY8 || pixel_format == AV_PIX_FMT_YUV420P ||
+            pixel_format == AV_PIX_FMT_YUVJ420P || pixel_format == AV_PIX_FMT_YUV422P ||
+            pixel_format == AV_PIX_FMT_YUVJ422P || pixel_format == AV_PIX_FMT_YUV444P ||
+            pixel_format == AV_PIX_FMT_YUVJ444P || pixel_format == AV_PIX_FMT_NV12 ||
+            pixel_format == AV_PIX_FMT_NV21;
+        if (direct_luma && source->width == output_width && source->height == output_height &&
+            source->data[0] != nullptr && source->linesize[0] >= output_width) {
+            for (int row = 0; row < output_height; ++row) {
+                std::memcpy(gray_frame.pixels.data() + static_cast<std::size_t>(row) *
+                                                           static_cast<std::size_t>(output_width),
+                            source->data[0] +
+                                static_cast<std::ptrdiff_t>(row) * source->linesize[0],
+                            static_cast<std::size_t>(output_width));
+            }
+            return &gray_frame;
+        }
+        std::uint8_t* destination[] = {gray_frame.pixels.data(), nullptr, nullptr, nullptr};
         int lines[] = {output_width, 0, 0, 0};
         gray_scaler = sws_getCachedContext(
             gray_scaler, source->width, source->height, static_cast<AVPixelFormat>(source->format),
             output_width, output_height, AV_PIX_FMT_GRAY8, SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (gray_scaler == nullptr || sws_scale(gray_scaler, source->data, source->linesize, 0,
                                                 source->height, destination, lines) <= 0) {
-            return std::nullopt;
+            return nullptr;
         }
-        return result;
+        return &gray_frame;
     }
 };
 
@@ -440,6 +492,7 @@ bool NetworkCameraSource::open(std::string* error) {
     }
     impl_->video_stream = result;
     AVStream* input_stream = context->streams[result];
+    impl_->input_time_base = input_stream->time_base;
     const AVCodec* codec = avcodec_find_decoder(input_stream->codecpar->codec_id);
     if (codec == nullptr) {
         set_error(error, "no decoder for camera codec");
@@ -499,7 +552,9 @@ CameraReadResult NetworkCameraSource::read() {
     }
     auto decoded_sample = [this]() -> CameraReadResult {
         CameraSample sample;
-        sample.frame = impl_->convert_gray(impl_->decoded.get());
+        if (impl_->should_analyze(impl_->decoded.get())) {
+            sample.frame = impl_->convert_gray(impl_->decoded.get());
+        }
         if (sample.frame) {
             auto retained = std::make_unique<DecodedImage::Impl>();
             if (!retained->frame || av_frame_ref(retained->frame.get(), impl_->decoded.get()) < 0) {
@@ -507,7 +562,6 @@ CameraReadResult NetworkCameraSource::read() {
                         "cannot retain decoded camera frame"};
             }
             sample.image = DecodedImage(std::move(retained));
-            sample.jpeg = impl_->encode_jpeg(impl_->decoded.get());
         }
         return {CameraReadStatus::sample, std::move(sample), {}};
     };
@@ -585,7 +639,9 @@ CameraReadResult NetworkCameraSource::read() {
         av_frame_unref(impl_->decoded.get());
         result = avcodec_receive_frame(impl_->decoder.get(), impl_->decoded.get());
         if (result >= 0) {
-            sample.frame = impl_->convert_gray(impl_->decoded.get());
+            if (impl_->should_analyze(impl_->decoded.get())) {
+                sample.frame = impl_->convert_gray(impl_->decoded.get());
+            }
             if (sample.frame) {
                 auto retained = std::make_unique<DecodedImage::Impl>();
                 if (!retained->frame ||
@@ -594,7 +650,6 @@ CameraReadResult NetworkCameraSource::read() {
                             "cannot retain decoded camera frame"};
                 }
                 sample.image = DecodedImage(std::move(retained));
-                sample.jpeg = impl_->encode_jpeg(impl_->decoded.get());
             }
         }
     }

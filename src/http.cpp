@@ -197,6 +197,20 @@ PublishedJpeg HttpServer::latest(const std::string& camera_id) const {
     return iterator == frames_.end() ? PublishedJpeg{} : iterator->second;
 }
 
+bool HttpServer::has_stream_clients(const std::string& camera_id) const {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    const auto iterator = stream_clients_.find(camera_id);
+    return iterator != stream_clients_.end() && iterator->second > 0;
+}
+
+bool HttpServer::wants_jpeg(const std::string& camera_id) const {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    const auto streams = stream_clients_.find(camera_id);
+    const auto requests = frame_requests_.find(camera_id);
+    return (streams != stream_clients_.end() && streams->second > 0) ||
+           (requests != frame_requests_.end() && requests->second > 0);
+}
+
 bool HttpServer::send_all(int fd, const void* data, std::size_t size) const {
     const auto* current = static_cast<const std::uint8_t*>(data);
     const auto deadline = std::chrono::steady_clock::now() + options_.write_timeout;
@@ -379,7 +393,26 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         return;
     }
     if (action == "/static/stream/timestamp") {
-        const auto frame = latest(camera);
+        PublishedJpeg frame;
+        {
+            std::unique_lock<std::mutex> lock(frames_mutex_);
+            const auto previous = frames_.find(camera);
+            const auto previous_version = previous == frames_.end() ? 0U : previous->second.version;
+            ++frame_requests_[camera];
+            (void)frames_changed_.wait_for(lock, options_.write_timeout, [&] {
+                const auto current = frames_.find(camera);
+                return !running_.load() ||
+                       (current != frames_.end() && current->second.version != previous_version);
+            });
+            const auto pending = frame_requests_.find(camera);
+            if (pending != frame_requests_.end() && --pending->second == 0) {
+                frame_requests_.erase(pending);
+            }
+            const auto current = frames_.find(camera);
+            if (current != frames_.end()) {
+                frame = current->second;
+            }
+        }
         if (!frame.bytes) {
             (void)send_text(client->fd, 404, "Not Found", "text/plain", "No frame\n");
         } else {
@@ -408,6 +441,10 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         client->done.store(true);
         return;
     }
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        ++stream_clients_[camera];
+    }
     std::uint64_t delivered = 0;
     while (running_.load()) {
         PublishedJpeg frame;
@@ -435,6 +472,13 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             break;
         }
         delivered = frame.version;
+    }
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        const auto iterator = stream_clients_.find(camera);
+        if (iterator != stream_clients_.end() && --iterator->second == 0) {
+            stream_clients_.erase(iterator);
+        }
     }
     client->done.store(true);
 }

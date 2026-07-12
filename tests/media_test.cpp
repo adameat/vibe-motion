@@ -50,14 +50,16 @@ int main(int, char** argv) {
         ring.push(sample.packet);
         if (sample.frame) {
             assert(sample.frame->pixels.size() == 160U * 120U);
-            assert(sample.jpeg.size() > 4);
-            assert(sample.jpeg[0] == 0xff && sample.jpeg[1] == 0xd8);
+            assert(sample.image);
+            const auto jpeg = source.render_jpeg(*sample.image);
+            assert(jpeg.size() > 4);
+            assert(jpeg[0] == 0xff && jpeg[1] == 0xd8);
             frames.push_back(*sample.frame);
             if (!overlay_tested && sample.image) {
                 const auto annotated =
                     source.render_jpeg(*sample.image, RedBox{20, 20, 100, 80, 4});
                 assert(annotated.size() > 4);
-                assert(annotated != sample.jpeg);
+                assert(annotated != jpeg);
                 std::ofstream output(directory / "media-redbox.jpg", std::ios::binary);
                 output.write(reinterpret_cast<const char*>(annotated.data()),
                              static_cast<std::streamsize>(annotated.size()));
@@ -86,6 +88,26 @@ int main(int, char** argv) {
     assert(timelapse.close(&error));
     assert(std::filesystem::file_size(timelapse_path) > 1000);
     source.close();
+
+    config.analysis_framerate = 2;
+    NetworkCameraSource throttled(config);
+    assert(throttled.open(&error));
+    int analyzed = 0;
+    int packets = 0;
+    for (;;) {
+        auto result = throttled.read();
+        if (result.status == CameraReadStatus::end_of_stream)
+            break;
+        if (result.status == CameraReadStatus::again)
+            continue;
+        assert(result.status == CameraReadStatus::sample);
+        assert(result.sample);
+        analyzed += result.sample->frame != nullptr ? 1 : 0;
+        packets += result.sample->packet.valid() ? 1 : 0;
+    }
+    assert(analyzed >= 5 && analyzed <= 7);
+    assert(packets > analyzed);
+    throttled.close();
 
     std::cout << "media tests passed\n";
 }

@@ -94,8 +94,9 @@ struct RedBox {
 
 struct CameraSourceConfig {
     std::string url;
-    int width = 0;  // 0 keeps the source width for motion analysis
-    int height = 0; // 0 keeps the source height for motion analysis
+    int width = 0;              // 0 keeps the source width for motion analysis
+    int height = 0;             // 0 keeps the source height for motion analysis
+    int analysis_framerate = 0; // <= 0 analyzes every decoded frame
     std::chrono::milliseconds io_timeout{10000};
     std::chrono::milliseconds reconnect_delay{1000};
     std::string rtsp_transport = "tcp";
@@ -106,9 +107,10 @@ struct CameraSourceConfig {
 struct CameraSample {
     // Invalid only for an extra frame drained from a multi-frame packet or at EOF.
     VideoPacket packet;
-    std::optional<GrayFrame> frame;    // absent when this packet produced no frame
+    // Owned by NetworkCameraSource and valid until its next read() or close().
+    // Keeping the storage in the source avoids allocating a multi-megabyte buffer per frame.
+    const GrayFrame* frame = nullptr;  // null when this packet produced no frame
     std::optional<DecodedImage> image; // color source for post-detection overlays
-    std::vector<std::uint8_t> jpeg;    // empty if disabled or no decoded frame
 };
 
 enum class CameraReadStatus { sample, again, timeout, end_of_stream, error };

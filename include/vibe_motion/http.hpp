@@ -52,6 +52,8 @@ class HttpServer {
     publish(std::string camera_id, std::vector<std::uint8_t> jpeg,
             std::chrono::system_clock::time_point captured_at = std::chrono::system_clock::now());
     PublishedJpeg latest(const std::string& camera_id) const;
+    bool has_stream_clients(const std::string& camera_id) const;
+    bool wants_jpeg(const std::string& camera_id) const;
 
   private:
     struct Client;
@@ -74,6 +76,8 @@ class HttpServer {
     mutable std::mutex frames_mutex_;
     std::condition_variable frames_changed_;
     std::unordered_map<std::string, PublishedJpeg> frames_;
+    std::unordered_map<std::string, std::size_t> stream_clients_;
+    std::unordered_map<std::string, std::size_t> frame_requests_;
     std::uint64_t next_version_ = 1;
 
     mutable std::mutex clients_mutex_;

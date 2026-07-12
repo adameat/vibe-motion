@@ -28,6 +28,13 @@ The repository includes `.clangd`, `.clang-format`, and `.clang-tidy`. Useful
 quality targets are `format-check` and `tidy`. A sanitizer build is configured
 with `-DVIBE_ENABLE_SANITIZERS=ON`.
 
+Deployment builds can opt in to CPU-specific code generation with
+`-DVIBE_ENABLE_NATIVE_OPTIMIZATION=ON` and to Clang ThinLTO with
+`-DVIBE_ENABLE_LTO=ON`. Both options are disabled by default so ordinary builds
+remain portable. Native binaries should only be moved to machines with a
+compatible CPU. LTO and sanitizers intentionally cannot be enabled in the same
+build directory; keep separate deployment and sanitizer builds.
+
 Do not point headers at one FFmpeg installation and libraries at another.  The
 CMake configuration intentionally searches only below `VIBE_FFMPEG_ROOT`.
 
