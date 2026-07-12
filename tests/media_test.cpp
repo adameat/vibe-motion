@@ -89,5 +89,25 @@ int main(int, char** argv) {
     assert(std::filesystem::file_size(timelapse_path) > 1000);
     source.close();
 
+    config.analysis_framerate = 2;
+    NetworkCameraSource throttled(config);
+    assert(throttled.open(&error));
+    int analyzed = 0;
+    int packets = 0;
+    for (;;) {
+        auto result = throttled.read();
+        if (result.status == CameraReadStatus::end_of_stream)
+            break;
+        if (result.status == CameraReadStatus::again)
+            continue;
+        assert(result.status == CameraReadStatus::sample);
+        assert(result.sample);
+        analyzed += result.sample->frame != nullptr ? 1 : 0;
+        packets += result.sample->packet.valid() ? 1 : 0;
+    }
+    assert(analyzed >= 5 && analyzed <= 7);
+    assert(packets > analyzed);
+    throttled.close();
+
     std::cout << "media tests passed\n";
 }

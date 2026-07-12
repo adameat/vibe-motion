@@ -354,6 +354,7 @@ class CameraWorker {
             source_config.url = config_.netcam_url;
             source_config.width = config_.width;
             source_config.height = config_.height;
+            source_config.analysis_framerate = config_.framerate;
             source_config.jpeg_quality = config_.movie_quality;
             const auto net_options = parse_netcam_options(config_.netcam_params);
             if (const auto found = net_options.find("interrupt"); found != net_options.end()) {

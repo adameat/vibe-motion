@@ -94,8 +94,9 @@ struct RedBox {
 
 struct CameraSourceConfig {
     std::string url;
-    int width = 0;  // 0 keeps the source width for motion analysis
-    int height = 0; // 0 keeps the source height for motion analysis
+    int width = 0;              // 0 keeps the source width for motion analysis
+    int height = 0;             // 0 keeps the source height for motion analysis
+    int analysis_framerate = 0; // <= 0 analyzes every decoded frame
     std::chrono::milliseconds io_timeout{10000};
     std::chrono::milliseconds reconnect_delay{1000};
     std::string rtsp_transport = "tcp";

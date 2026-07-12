@@ -49,7 +49,7 @@ class MotionDetector {
     std::vector<float> background_;
     std::vector<std::uint8_t> mask_;
     std::vector<std::uint8_t> changed_;
-    std::vector<std::uint8_t> filtered_;
+    std::size_t active_mask_pixels_ = 0;
     double background_changes_ = 0.0;
 };
 

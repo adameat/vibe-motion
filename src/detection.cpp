@@ -38,6 +38,8 @@ void MotionDetector::set_mask(int width, int height, std::vector<std::uint8_t> e
     width_ = width;
     height_ = height;
     mask_ = std::move(enabled);
+    active_mask_pixels_ = static_cast<std::size_t>(
+        std::count_if(mask_.begin(), mask_.end(), [](std::uint8_t value) { return value != 0; }));
     background_.clear();
 }
 
@@ -78,7 +80,6 @@ void MotionDetector::load_pgm_mask(const std::filesystem::path& path, int expect
 void MotionDetector::reset() {
     background_.clear();
     changed_.clear();
-    filtered_.clear();
     background_changes_ = 0.0;
 }
 
@@ -95,50 +96,32 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
     height_ = frame.height;
     if (background_.empty()) {
         background_.assign(frame.pixels.begin(), frame.pixels.end());
-        changed_.assign(frame.pixels.size(), 0);
+        changed_.resize(frame.pixels.size());
         return {};
     }
 
-    changed_.assign(frame.pixels.size(), 0);
-    for (std::size_t index = 0; index < frame.pixels.size(); ++index) {
-        if (!mask_.empty() && mask_[index] == 0) {
-            continue;
+    changed_.resize(frame.pixels.size());
+    const float noise_level = static_cast<float>(settings_.noise_level);
+    if (mask_.empty()) {
+        // This is the overwhelmingly common path. Keep the mask test out of its
+        // inner loop so every iteration performs only the pixel comparison.
+        for (std::size_t index = 0; index < frame.pixels.size(); ++index) {
+            const float difference =
+                std::abs(static_cast<float>(frame.pixels[index]) - background_[index]);
+            changed_[index] = static_cast<std::uint8_t>(difference > noise_level);
         }
-        float difference = std::abs(static_cast<float>(frame.pixels[index]) - background_[index]);
-        if (!mask_.empty()) {
-            difference *= static_cast<float>(mask_[index]) / 255.0F;
-        }
-        if (difference > static_cast<float>(settings_.noise_level)) {
-            changed_[index] = 1;
-        }
-    }
-
-    if (settings_.despeckle && width_ >= 3 && height_ >= 3) {
-        filtered_.assign(changed_.begin(), changed_.end());
-        for (int y = 1; y < height_ - 1; ++y) {
-            for (int x = 1; x < width_ - 1; ++x) {
-                const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
-                                   static_cast<std::size_t>(x);
-                if (changed_[index] == 0) {
-                    continue;
-                }
-                int neighbors = 0;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        if (dx != 0 || dy != 0) {
-                            const auto neighbor = static_cast<std::size_t>(y + dy) *
-                                                      static_cast<std::size_t>(width_) +
-                                                  static_cast<std::size_t>(x + dx);
-                            neighbors += changed_[neighbor];
-                        }
-                    }
-                }
-                if (neighbors < 2) {
-                    filtered_[index] = 0;
-                }
+    } else {
+        for (std::size_t index = 0; index < frame.pixels.size(); ++index) {
+            const auto mask_value = mask_[index];
+            if (mask_value == 0) {
+                changed_[index] = 0;
+                continue;
             }
+            float difference =
+                std::abs(static_cast<float>(frame.pixels[index]) - background_[index]);
+            difference *= static_cast<float>(mask_value) / 255.0F;
+            changed_[index] = static_cast<std::uint8_t>(difference > noise_level);
         }
-        changed_.swap(filtered_);
     }
 
     DetectionResult result;
@@ -148,28 +131,64 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
     int max_y = -1;
     std::uint64_t sum_x = 0;
     std::uint64_t sum_y = 0;
-    for (int y = 0; y < height_; ++y) {
-        for (int x = 0; x < width_; ++x) {
-            const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
-                               static_cast<std::size_t>(x);
-            if (changed_[index] == 0) {
+    const auto accumulate_changed = [&](int x, int y) {
+        ++result.changed_pixels;
+        sum_x += static_cast<std::uint64_t>(x);
+        sum_y += static_cast<std::uint64_t>(y);
+        min_x = std::min(min_x, x);
+        min_y = std::min(min_y, y);
+        max_x = std::max(max_x, x);
+        max_y = std::max(max_y, y);
+    };
+
+    if (settings_.despeckle && width_ >= 3 && height_ >= 3) {
+        for (int y = 0; y < height_; ++y) {
+            const auto row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_);
+            if (y == 0 || y == height_ - 1) {
+                for (int x = 0; x < width_; ++x) {
+                    if (changed_[row + static_cast<std::size_t>(x)] != 0) {
+                        accumulate_changed(x, y);
+                    }
+                }
                 continue;
             }
-            ++result.changed_pixels;
-            sum_x += static_cast<std::uint64_t>(x);
-            sum_y += static_cast<std::uint64_t>(y);
-            min_x = std::min(min_x, x);
-            min_y = std::min(min_y, y);
-            max_x = std::max(max_x, x);
-            max_y = std::max(max_y, y);
+
+            if (changed_[row] != 0) {
+                accumulate_changed(0, y);
+            }
+            const auto previous_row = row - static_cast<std::size_t>(width_);
+            const auto next_row = row + static_cast<std::size_t>(width_);
+            for (int x = 1; x < width_ - 1; ++x) {
+                const auto column = static_cast<std::size_t>(x);
+                if (changed_[row + column] == 0) {
+                    continue;
+                }
+                const int neighbors =
+                    changed_[previous_row + column - 1] + changed_[previous_row + column] +
+                    changed_[previous_row + column + 1] + changed_[row + column - 1] +
+                    changed_[row + column + 1] + changed_[next_row + column - 1] +
+                    changed_[next_row + column] + changed_[next_row + column + 1];
+                if (neighbors >= 2) {
+                    accumulate_changed(x, y);
+                }
+            }
+            if (changed_[row + static_cast<std::size_t>(width_ - 1)] != 0) {
+                accumulate_changed(width_ - 1, y);
+            }
+        }
+    } else {
+        for (int y = 0; y < height_; ++y) {
+            for (int x = 0; x < width_; ++x) {
+                const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+                                   static_cast<std::size_t>(x);
+                if (changed_[index] != 0) {
+                    accumulate_changed(x, y);
+                }
+            }
         }
     }
 
-    const auto active_pixels =
-        mask_.empty()
-            ? frame.pixels.size()
-            : static_cast<std::size_t>(std::count_if(
-                  mask_.begin(), mask_.end(), [](std::uint8_t value) { return value != 0; }));
+    const auto active_pixels = mask_.empty() ? frame.pixels.size() : active_mask_pixels_;
     if (settings_.lightswitch_percent > 0 && active_pixels > 0 &&
         result.changed_pixels * 100U >=
             active_pixels * static_cast<unsigned>(settings_.lightswitch_percent)) {

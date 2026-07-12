@@ -4,6 +4,9 @@ project(vibe-motion VERSION 0.1.0 LANGUAGES CXX)
 option(VIBE_BUILD_TESTS "Build unit tests" ON)
 option(VIBE_ENABLE_CLANG_TIDY "Run clang-tidy while compiling" OFF)
 option(VIBE_ENABLE_SANITIZERS "Enable Clang AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(VIBE_ENABLE_NATIVE_OPTIMIZATION
+  "Optimize for the CPU used to build vibe-motion (-march=native)" OFF)
+option(VIBE_ENABLE_LTO "Enable Clang ThinLTO/interprocedural optimization" OFF)
 set(VIBE_FFMPEG_ROOT "/usr/local" CACHE PATH "Root of one coherent FFmpeg installation")
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -19,6 +22,35 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(VIBE_ENABLE_NATIVE_OPTIMIZATION)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=native" VIBE_NATIVE_OPTIMIZATION_SUPPORTED)
+  if(NOT VIBE_NATIVE_OPTIMIZATION_SUPPORTED)
+    message(FATAL_ERROR
+      "VIBE_ENABLE_NATIVE_OPTIMIZATION was requested, but ${CMAKE_CXX_COMPILER} "
+      "does not support -march=native")
+  endif()
+  add_compile_options(-march=native)
+endif()
+
+if(VIBE_ENABLE_LTO)
+  if(VIBE_ENABLE_SANITIZERS)
+    message(FATAL_ERROR
+      "VIBE_ENABLE_LTO and VIBE_ENABLE_SANITIZERS cannot be enabled together. "
+      "Use a separate non-sanitized build directory for LTO deployment.")
+  endif()
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT VIBE_LTO_SUPPORTED OUTPUT VIBE_LTO_ERROR LANGUAGES CXX)
+  if(NOT VIBE_LTO_SUPPORTED)
+    message(FATAL_ERROR
+      "VIBE_ENABLE_LTO was requested, but ThinLTO/IPO is not supported by the "
+      "configured Clang toolchain:\n${VIBE_LTO_ERROR}")
+  endif()
+  # CMake selects Clang's -flto=thin implementation when IPO is enabled.
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 if(VIBE_ENABLE_SANITIZERS)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined -fuse-ld=lld)
@@ -107,3 +139,4 @@ if(VIBE_BUILD_TESTS)
     set_tests_properties(media PROPERTIES DEPENDS media_fixture)
   endif()
 endif()
+include(CTest)
