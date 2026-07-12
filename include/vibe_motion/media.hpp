@@ -106,9 +106,10 @@ struct CameraSourceConfig {
 struct CameraSample {
     // Invalid only for an extra frame drained from a multi-frame packet or at EOF.
     VideoPacket packet;
-    std::optional<GrayFrame> frame;    // absent when this packet produced no frame
+    // Owned by NetworkCameraSource and valid until its next read() or close().
+    // Keeping the storage in the source avoids allocating a multi-megabyte buffer per frame.
+    const GrayFrame* frame = nullptr;  // null when this packet produced no frame
     std::optional<DecodedImage> image; // color source for post-detection overlays
-    std::vector<std::uint8_t> jpeg;    // empty if disabled or no decoded frame
 };
 
 enum class CameraReadStatus { sample, again, timeout, end_of_stream, error };

@@ -78,6 +78,7 @@ void MotionDetector::load_pgm_mask(const std::filesystem::path& path, int expect
 void MotionDetector::reset() {
     background_.clear();
     changed_.clear();
+    filtered_.clear();
     background_changes_ = 0.0;
 }
 
@@ -113,7 +114,7 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
     }
 
     if (settings_.despeckle && width_ >= 3 && height_ >= 3) {
-        auto filtered = changed_;
+        filtered_.assign(changed_.begin(), changed_.end());
         for (int y = 1; y < height_ - 1; ++y) {
             for (int x = 1; x < width_ - 1; ++x) {
                 const auto index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
@@ -133,11 +134,11 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
                     }
                 }
                 if (neighbors < 2) {
-                    filtered[index] = 0;
+                    filtered_[index] = 0;
                 }
             }
         }
-        changed_.swap(filtered);
+        changed_.swap(filtered_);
     }
 
     DetectionResult result;

@@ -50,14 +50,16 @@ int main(int, char** argv) {
         ring.push(sample.packet);
         if (sample.frame) {
             assert(sample.frame->pixels.size() == 160U * 120U);
-            assert(sample.jpeg.size() > 4);
-            assert(sample.jpeg[0] == 0xff && sample.jpeg[1] == 0xd8);
+            assert(sample.image);
+            const auto jpeg = source.render_jpeg(*sample.image);
+            assert(jpeg.size() > 4);
+            assert(jpeg[0] == 0xff && jpeg[1] == 0xd8);
             frames.push_back(*sample.frame);
             if (!overlay_tested && sample.image) {
                 const auto annotated =
                     source.render_jpeg(*sample.image, RedBox{20, 20, 100, 80, 4});
                 assert(annotated.size() > 4);
-                assert(annotated != sample.jpeg);
+                assert(annotated != jpeg);
                 std::ofstream output(directory / "media-redbox.jpg", std::ios::binary);
                 output.write(reinterpret_cast<const char*>(annotated.data()),
                              static_cast<std::streamsize>(annotated.size()));

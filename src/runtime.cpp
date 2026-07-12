@@ -445,27 +445,29 @@ class CameraWorker {
                     state.event_number = events.event_number();
                 });
 
-                if (http_ != nullptr && !sample.jpeg.empty()) {
-                    const auto now = std::chrono::steady_clock::now();
-                    const auto period =
-                        std::chrono::milliseconds(1000 / std::max(1, config_.stream_maxrate));
-                    if (last_http_publish.time_since_epoch().count() == 0 ||
-                        now - last_http_publish >= period) {
-                        http_->publish(std::to_string(config_.camera_id), sample.jpeg,
-                                       frame.captured_at);
-                        last_http_publish = now;
+                std::vector<std::uint8_t> plain_jpeg;
+                bool jpeg_attempted = false;
+                const auto ensure_jpeg = [&]() -> const std::vector<std::uint8_t>& {
+                    if (!jpeg_attempted) {
+                        jpeg_attempted = true;
+                        if (sample.image) {
+                            plain_jpeg = source.render_jpeg(*sample.image);
+                        }
                     }
-                }
+                    return plain_jpeg;
+                };
 
                 const auto epoch_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                                frame.captured_at.time_since_epoch())
                                                .count();
+                bool snapshot_due = false;
                 if (config_.snapshot_interval > 0) {
                     const auto bucket = epoch_seconds / config_.snapshot_interval;
                     if (bucket != snapshot_bucket) {
                         snapshot_bucket = bucket;
+                        snapshot_due = true;
                         try {
-                            save_snapshot(sample.jpeg, frame, detection, events.event_number());
+                            save_snapshot(ensure_jpeg(), frame, detection, events.event_number());
                         } catch (const std::exception& error) {
                             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                      ": snapshot: ", error.what());
@@ -527,25 +529,38 @@ class CameraWorker {
                         }
                     }
                 }
-                if (events.active() && !sample.jpeg.empty() &&
-                    (best_jpeg.empty() ||
-                     detection.changed_pixels > best_detection.changed_pixels)) {
+                if (events.active() && (best_frame.captured_at.time_since_epoch().count() == 0 ||
+                                        detection.changed_pixels > best_detection.changed_pixels)) {
+                    best_jpeg.clear();
                     const bool draw_redbox = config_.locate_motion_mode == "preview" &&
                                              config_.locate_motion_style == "redbox" &&
                                              detection.changed_pixels > 0 &&
                                              sample.image.has_value();
-                    if (draw_redbox) {
+                    if (config_.picture_output && draw_redbox) {
                         const auto& region = detection.region;
                         best_jpeg = source.render_jpeg(*sample.image,
                                                        RedBox{region.left, region.top, region.right,
                                                               region.bottom,
                                                               std::max(2, config_.text_scale * 2)});
                     }
-                    if (best_jpeg.empty()) {
-                        best_jpeg = sample.jpeg;
+                    if (config_.picture_output && best_jpeg.empty()) {
+                        best_jpeg = ensure_jpeg();
                     }
-                    best_frame = frame;
+                    best_frame = {frame.width, frame.height, frame.sequence, frame.captured_at, {}};
                     best_detection = detection;
+                }
+                if (http_ != nullptr) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto period =
+                        std::chrono::milliseconds(1000 / std::max(1, config_.stream_maxrate));
+                    const bool stream_due = http_->wants_jpeg(std::to_string(config_.camera_id)) &&
+                                            (last_http_publish.time_since_epoch().count() == 0 ||
+                                             now - last_http_publish >= period);
+                    if ((stream_due || snapshot_due) && !ensure_jpeg().empty()) {
+                        http_->publish(std::to_string(config_.camera_id), std::move(plain_jpeg),
+                                       frame.captured_at);
+                        last_http_publish = now;
+                    }
                 }
                 if (decision.event_ended) {
                     finish_event(movie, movie_path, best_jpeg, best_frame, best_detection,

@@ -223,6 +223,7 @@ struct NetworkCameraSource::Impl {
     SwsContext* jpeg_scaler = nullptr;
     CodecPtr jpeg_encoder;
     FramePtr jpeg_frame;
+    GrayFrame gray_frame;
     int video_stream = -1;
     int output_width = 0;
     int output_height = 0;
@@ -366,24 +367,23 @@ struct NetworkCameraSource::Impl {
         return bytes;
     }
 
-    std::optional<GrayFrame> convert_gray(const AVFrame* source) {
-        GrayFrame result;
-        result.width = output_width;
-        result.height = output_height;
-        result.sequence = ++sequence;
-        result.captured_at = std::chrono::system_clock::now();
-        result.pixels.resize(static_cast<std::size_t>(output_width) *
-                             static_cast<std::size_t>(output_height));
-        std::uint8_t* destination[] = {result.pixels.data(), nullptr, nullptr, nullptr};
+    const GrayFrame* convert_gray(const AVFrame* source) {
+        gray_frame.width = output_width;
+        gray_frame.height = output_height;
+        gray_frame.sequence = ++sequence;
+        gray_frame.captured_at = std::chrono::system_clock::now();
+        gray_frame.pixels.resize(static_cast<std::size_t>(output_width) *
+                                 static_cast<std::size_t>(output_height));
+        std::uint8_t* destination[] = {gray_frame.pixels.data(), nullptr, nullptr, nullptr};
         int lines[] = {output_width, 0, 0, 0};
         gray_scaler = sws_getCachedContext(
             gray_scaler, source->width, source->height, static_cast<AVPixelFormat>(source->format),
             output_width, output_height, AV_PIX_FMT_GRAY8, SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (gray_scaler == nullptr || sws_scale(gray_scaler, source->data, source->linesize, 0,
                                                 source->height, destination, lines) <= 0) {
-            return std::nullopt;
+            return nullptr;
         }
-        return result;
+        return &gray_frame;
     }
 };
 
@@ -507,7 +507,6 @@ CameraReadResult NetworkCameraSource::read() {
                         "cannot retain decoded camera frame"};
             }
             sample.image = DecodedImage(std::move(retained));
-            sample.jpeg = impl_->encode_jpeg(impl_->decoded.get());
         }
         return {CameraReadStatus::sample, std::move(sample), {}};
     };
@@ -594,7 +593,6 @@ CameraReadResult NetworkCameraSource::read() {
                             "cannot retain decoded camera frame"};
                 }
                 sample.image = DecodedImage(std::move(retained));
-                sample.jpeg = impl_->encode_jpeg(impl_->decoded.get());
             }
         }
     }
