@@ -1,0 +1,5 @@
+CompileFlags:
+  CompilationDatabase: build-clang
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict

@@ -1,0 +1,23 @@
+[Unit]
+Description=vibe-motion network camera monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=motion
+Group=motion
+UMask=0002
+ExecStart=/usr/local/bin/vibe-motion -n -c /etc/motion/motion.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/cam /var/log/motion
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

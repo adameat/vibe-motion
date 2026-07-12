@@ -1,0 +1,15 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-optin.performance.Padding,
+  bugprone-implicit-widening-of-multiplication-result,
+  bugprone-misplaced-widening-cast,
+  performance-unnecessary-value-param
+WarningsAsErrors: >
+  clang-analyzer-*,
+  -clang-analyzer-optin.performance.Padding,
+  bugprone-implicit-widening-of-multiplication-result,
+  bugprone-misplaced-widening-cast,
+  performance-unnecessary-value-param
+HeaderFilterRegex: '.*/(include|src)/.*'
+FormatStyle: file

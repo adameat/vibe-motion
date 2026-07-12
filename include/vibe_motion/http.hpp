@@ -1,0 +1,83 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace vibe_motion {
+
+struct HttpServerOptions {
+    std::string bind_address = "0.0.0.0";
+    std::uint16_t port = 8081;
+    std::size_t max_clients = 64;
+    std::chrono::milliseconds write_timeout{2000};
+};
+
+struct PublishedJpeg {
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    std::chrono::system_clock::time_point captured_at{};
+    std::uint64_t version = 0;
+};
+
+class HttpServer {
+  public:
+    using StatusProvider = std::function<std::string()>;
+
+    explicit HttpServer(HttpServerOptions options = {}, StatusProvider status_provider = {});
+    ~HttpServer();
+
+    HttpServer(const HttpServer&) = delete;
+    HttpServer& operator=(const HttpServer&) = delete;
+
+    void start();
+    void stop();
+    bool running() const noexcept {
+        return running_.load();
+    }
+    std::uint16_t port() const noexcept {
+        return bound_port_.load();
+    }
+
+    // Only the latest encoded frame per camera is retained.
+    void
+    publish(std::string camera_id, std::vector<std::uint8_t> jpeg,
+            std::chrono::system_clock::time_point captured_at = std::chrono::system_clock::now());
+    PublishedJpeg latest(const std::string& camera_id) const;
+
+  private:
+    struct Client;
+
+    void accept_loop();
+    void handle_client(const std::shared_ptr<Client>& client);
+    bool send_all(int fd, const void* data, std::size_t size) const;
+    bool send_text(int fd, int status, const std::string& reason, const std::string& content_type,
+                   const std::string& body, bool close = true) const;
+    std::string root_page() const;
+    void close_client_sockets();
+
+    HttpServerOptions options_;
+    StatusProvider status_provider_;
+    std::atomic<bool> running_{false};
+    std::atomic<std::uint16_t> bound_port_{0};
+    int listener_ = -1;
+    std::thread accept_thread_;
+
+    mutable std::mutex frames_mutex_;
+    std::condition_variable frames_changed_;
+    std::unordered_map<std::string, PublishedJpeg> frames_;
+    std::uint64_t next_version_ = 1;
+
+    mutable std::mutex clients_mutex_;
+    std::vector<std::shared_ptr<Client>> clients_;
+};
+
+} // namespace vibe_motion
