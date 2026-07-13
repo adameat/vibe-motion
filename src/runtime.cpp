@@ -484,12 +484,12 @@ class CameraWorker {
                         if (movie.open(movie_path.string(), source.stream_info(), &error)) {
                             values.filename = movie_path.string();
                             values.file_type = "movie";
-                            hook(config_.on_movie_start, values, frame.captured_at);
                             if (!movie.write_preroll(ring, &error)) {
                                 Logger::instance().write(
                                     LogLevel::warning, "camera ", config_.camera_id,
                                     ": movie preroll: ", redact_secrets(error));
                             }
+                            hook(config_.on_movie_start, values, frame.captured_at);
                         } else {
                             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                      ": movie open: ", redact_secrets(error));

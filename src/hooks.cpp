@@ -307,7 +307,9 @@ HookExecutor::HookExecutor(HookExecutorOptions options) : options_(std::move(opt
     require_single_threaded_process();
     int sockets[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) {
-        throw std::runtime_error("cannot create hook supervisor socket");
+        const int saved_errno = errno;
+        throw std::runtime_error(std::string("cannot create hook supervisor socket: ") +
+                                 std::strerror(saved_errno));
     }
     supervisor_pid_ = ::fork();
     if (supervisor_pid_ == 0) {
