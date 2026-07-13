@@ -518,6 +518,8 @@ void HookExecutor::fail_supervisor(int error) {
         return;
     }
     supervisor_failed_ = true;
+    stopping_ = true;
+    const int failure = error == 0 ? EPIPE : error;
     if (supervisor_socket_ >= 0) {
         ::close(supervisor_socket_);
         supervisor_socket_ = -1;
@@ -527,7 +529,17 @@ void HookExecutor::fail_supervisor(int error) {
         if (children_.front().pid > 0) {
             (void)::kill(-children_.front().pid, SIGKILL);
         }
-        finish(0, 127 << 8, error == 0 ? EPIPE : error);
+        finish(0, 127 << 8, failure);
+    }
+    while (!jobs_.empty()) {
+        Job job = std::move(jobs_.front());
+        jobs_.pop_front();
+        if (job.completion) {
+            HookResult result;
+            result.argv = std::move(job.argv);
+            result.exec_errno = failure;
+            completions_.emplace_back(std::move(job.completion), std::move(result));
+        }
     }
 }
 
