@@ -94,7 +94,7 @@ int hook_supervisor(int socket, const std::string& process_name) {
 
     while (!stopping || !children.empty()) {
         pollfd descriptor{socket, POLLIN, 0};
-        constexpr int timeout = 25;
+        const int timeout = !stopping && children.empty() ? -1 : 25;
         int polled = 0;
         do {
             polled = ::poll(&descriptor, 1, timeout);
