@@ -577,7 +577,7 @@ void Config::validate() const {
                     "timelapse_fps must be between 1 and 240");
         check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
                     "only hourly timelapse_mode is implemented");
-        const std::string timelapse_container = lower(c.timelapse_container);
+        const std::string timelapse_container = lower(trim(c.timelapse_container));
         check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
                         timelapse_container == "mpeg4",
                     c, "timelapse_container must be mkv or mpeg4");

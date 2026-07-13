@@ -69,6 +69,12 @@ int main() {
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
 
+    Config padded_container = deployment;
+    for (auto& camera : padded_container.cameras) {
+        camera.timelapse_container = " MPEG4 ";
+    }
+    padded_container.validate();
+
     const std::string safe = config.dump_effective();
     assert(safe.find("alice:secret") == std::string::npos);
     assert(safe.find("rtsp://REDACTED@example.test/live") != std::string::npos);
