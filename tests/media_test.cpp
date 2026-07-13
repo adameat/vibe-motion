@@ -1,5 +1,11 @@
 #include "vibe_motion/media.hpp"
 
+#include "media_internal.hpp"
+
+extern "C" {
+#include <libavutil/frame.h>
+}
+
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -9,7 +15,30 @@
 
 using namespace vibe_motion;
 
+static void test_decoded_frame_quality() {
+    AVFrame frame{};
+    assert(detail::decoded_frame_usable(&frame));
+    assert(!detail::decoded_frame_usable(nullptr));
+
+    frame.flags = AV_FRAME_FLAG_CORRUPT;
+    assert(!detail::decoded_frame_usable(&frame));
+    frame.flags = AV_FRAME_FLAG_DISCARD;
+    assert(!detail::decoded_frame_usable(&frame));
+    frame.flags = AV_FRAME_FLAG_KEY;
+    assert(detail::decoded_frame_usable(&frame));
+
+    frame.decode_error_flags = FF_DECODE_ERROR_INVALID_BITSTREAM;
+    assert(!detail::decoded_frame_usable(&frame));
+    frame.decode_error_flags = FF_DECODE_ERROR_MISSING_REFERENCE;
+    assert(!detail::decoded_frame_usable(&frame));
+    frame.decode_error_flags = FF_DECODE_ERROR_CONCEALMENT_ACTIVE;
+    assert(!detail::decoded_frame_usable(&frame));
+    frame.decode_error_flags = FF_DECODE_ERROR_DECODE_SLICES;
+    assert(!detail::decoded_frame_usable(&frame));
+}
+
 int main(int, char** argv) {
+    test_decoded_frame_quality();
     const auto directory = std::filesystem::path(argv[0]).parent_path();
     const auto input = directory / "media-fixture.mp4";
     if (!std::filesystem::exists(input)) {

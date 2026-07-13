@@ -109,7 +109,7 @@ install(FILES packaging/vibe-motion.service DESTINATION lib/systemd/system)
 
 file(GLOB_RECURSE VIBE_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/include/*.hpp"
-  "${CMAKE_SOURCE_DIR}/src/*.cpp"
+  "${CMAKE_SOURCE_DIR}/src/*.cpp" "${CMAKE_SOURCE_DIR}/src/*.hpp"
   "${CMAKE_SOURCE_DIR}/tests/*.cpp")
 file(GLOB VIBE_TIDY_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp")
 add_custom_target(format
@@ -131,6 +131,8 @@ if(VIBE_BUILD_TESTS)
     target_compile_options(${test_name}_test PRIVATE ${VIBE_CLANG_WARNINGS})
     add_test(NAME ${test_name} COMMAND ${test_name}_test)
   endforeach()
+  target_include_directories(media_test PRIVATE "${FFMPEG_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
   find_program(FFMPEG_EXECUTABLE ffmpeg)
   if(FFMPEG_EXECUTABLE)
     add_test(NAME media_fixture COMMAND "${FFMPEG_EXECUTABLE}" -y -loglevel error

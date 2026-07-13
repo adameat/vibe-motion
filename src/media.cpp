@@ -1,5 +1,7 @@
 #include "vibe_motion/media.hpp"
 
+#include "media_internal.hpp"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -92,6 +94,21 @@ bool allocate_video_frame(AVFrame* frame, AVPixelFormat format, int width, int h
 }
 
 } // namespace
+
+namespace detail {
+
+bool decoded_frame_usable(const AVFrame* frame) noexcept {
+    if (frame == nullptr) {
+        return false;
+    }
+    // Decoders can conceal damaged slices and still return success. Both the
+    // generic frame flags and codec-specific decode errors must therefore be
+    // clean before motion analysis sees the pixels.
+    constexpr int rejected_flags = AV_FRAME_FLAG_CORRUPT | AV_FRAME_FLAG_DISCARD;
+    return (frame->flags & rejected_flags) == 0 && frame->decode_error_flags == 0;
+}
+
+} // namespace detail
 
 struct StreamInfo::Impl {
     AVCodecParameters* parameters = nullptr;
@@ -456,6 +473,7 @@ bool NetworkCameraSource::open(std::string* error) {
         set_error(error, "cannot allocate FFmpeg input context");
         return false;
     }
+    context->flags |= AVFMT_FLAG_DISCARD_CORRUPT;
     context->interrupt_callback = AVIOInterruptCB{&Impl::interrupt, impl_.get()};
     AVDictionary* options = nullptr;
     if (!impl_->config.rtsp_transport.empty() && impl_->config.url.rfind("rtsp", 0) == 0) {
@@ -550,8 +568,10 @@ CameraReadResult NetworkCameraSource::read() {
     if (!is_open()) {
         return {CameraReadStatus::error, std::nullopt, "camera is not open"};
     }
-    auto decoded_sample = [this]() -> CameraReadResult {
-        CameraSample sample;
+    auto decoded_sample = [this](CameraSample sample = {}) -> CameraReadResult {
+        if (!detail::decoded_frame_usable(impl_->decoded.get())) {
+            return {CameraReadStatus::sample, std::move(sample), {}};
+        }
         if (impl_->should_analyze(impl_->decoded.get())) {
             sample.frame = impl_->convert_gray(impl_->decoded.get());
         }
@@ -639,18 +659,7 @@ CameraReadResult NetworkCameraSource::read() {
         av_frame_unref(impl_->decoded.get());
         result = avcodec_receive_frame(impl_->decoder.get(), impl_->decoded.get());
         if (result >= 0) {
-            if (impl_->should_analyze(impl_->decoded.get())) {
-                sample.frame = impl_->convert_gray(impl_->decoded.get());
-            }
-            if (sample.frame) {
-                auto retained = std::make_unique<DecodedImage::Impl>();
-                if (!retained->frame ||
-                    av_frame_ref(retained->frame.get(), impl_->decoded.get()) < 0) {
-                    return {CameraReadStatus::error, std::nullopt,
-                            "cannot retain decoded camera frame"};
-                }
-                sample.image = DecodedImage(std::move(retained));
-            }
+            return decoded_sample(std::move(sample));
         }
     }
     if (result < 0 && result != AVERROR(EAGAIN) && result != AVERROR_EOF) {
