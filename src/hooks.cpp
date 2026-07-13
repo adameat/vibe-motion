@@ -70,7 +70,7 @@ int hook_supervisor(int socket, const std::string& process_name) {
 
     while (!stopping || !children.empty()) {
         pollfd descriptor{socket, POLLIN, 0};
-        const int timeout = stopping ? 0 : 25;
+        constexpr int timeout = 25;
         int polled = 0;
         do {
             polled = ::poll(&descriptor, 1, timeout);
@@ -376,10 +376,16 @@ void HookExecutor::stop() {
 void HookExecutor::launch(Job job) {
     const std::uint64_t job_id = next_job_id_++;
     std::size_t request_size = sizeof(RequestHeader);
+    bool request_too_large = false;
     for (const auto& argument : job.argv) {
+        if (request_size > maximum_request_size - sizeof(std::uint32_t) ||
+            argument.size() > maximum_request_size - request_size - sizeof(std::uint32_t)) {
+            request_too_large = true;
+            break;
+        }
         request_size += sizeof(std::uint32_t) + argument.size();
     }
-    if (request_size > maximum_request_size) {
+    if (request_too_large) {
         HookResult result;
         result.argv = job.argv;
         result.exec_errno = E2BIG;

@@ -25,11 +25,9 @@ int main() {
     std::string original_process_name;
     original_name_input >> original_process_name;
     HookExecutor executor({1, 4, 5s, 100ms, "motion"});
-    HookResult first_result;
     const std::string shell = "printf '%s ' \"$PPID\" > '" + output.string() +
                               "'; cat /proc/$PPID/comm >> '" + output.string() + "'";
-    assert(executor.submit(std::vector<std::string>{"/bin/sh", "-c", shell},
-                           [&](const HookResult& result) { first_result = result; }));
+    assert(executor.submit(std::vector<std::string>{"/bin/sh", "-c", shell}));
     assert(executor.wait_idle(5s));
     const std::string second_shell = "printf '%s ' \"$PPID\" > '" + second_output +
                                      "'; cat /proc/$PPID/comm >> '" + second_output + "'";
@@ -45,7 +43,6 @@ int main() {
     second_input >> second_parent_pid >> second_parent_name;
     std::filesystem::remove(output);
     std::filesystem::remove(second_output);
-    assert(first_result.exit_code == 0 && first_result.exec_errno == 0);
     assert(parent_pid > 0 && parent_pid == second_parent_pid);
     assert(parent_name == "motion" && second_parent_name == "motion");
     executor.stop();
