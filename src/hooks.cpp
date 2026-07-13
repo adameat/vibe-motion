@@ -322,6 +322,13 @@ HookExecutor::HookExecutor(HookExecutorOptions options) : options_(std::move(opt
                                  std::strerror(saved_errno));
     }
     supervisor_socket_ = sockets[0];
+    const int socket_flags = ::fcntl(supervisor_socket_, F_GETFL);
+    if (socket_flags < 0 || ::fcntl(supervisor_socket_, F_SETFL, socket_flags | O_NONBLOCK) != 0) {
+        const int saved_errno = errno;
+        stop_supervisor();
+        throw std::runtime_error(std::string("cannot configure hook supervisor socket: ") +
+                                 std::strerror(saved_errno));
+    }
     try {
         worker_ = std::thread(&HookExecutor::run, this);
     } catch (...) {
@@ -398,8 +405,8 @@ void HookExecutor::stop() {
     }
 }
 
-void HookExecutor::launch(Job job) {
-    const std::uint64_t job_id = next_job_id_++;
+bool HookExecutor::launch(Job& job) {
+    const std::uint64_t job_id = next_job_id_;
     std::size_t request_size = sizeof(RequestHeader);
     bool request_too_large = false;
     for (const auto& argument : job.argv) {
@@ -417,7 +424,7 @@ void HookExecutor::launch(Job job) {
         if (job.completion) {
             completions_.emplace_back(std::move(job.completion), std::move(result));
         }
-        return;
+        return true;
     }
 
     std::vector<char> request(request_size);
@@ -432,6 +439,9 @@ void HookExecutor::launch(Job job) {
         offset += argument.size();
     }
     if (!send_packet(supervisor_socket_, request.data(), request.size())) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return false;
+        }
         const int send_error = errno == 0 ? EPIPE : errno;
         HookResult result;
         result.argv = job.argv;
@@ -440,10 +450,12 @@ void HookExecutor::launch(Job job) {
             completions_.emplace_back(std::move(job.completion), std::move(result));
         }
         fail_supervisor(send_error);
-        return;
+        return true;
     }
+    ++next_job_id_;
     children_.push_back(
         {job_id, -1, std::chrono::steady_clock::now(), {}, false, false, std::move(job)});
+    return true;
 }
 
 void HookExecutor::finish(std::size_t index, int status, int exec_error) {
@@ -574,7 +586,10 @@ void HookExecutor::run() {
         while (!stopping_ && !jobs_.empty() && children_.size() < options_.max_concurrent) {
             Job job = std::move(jobs_.front());
             jobs_.pop_front();
-            launch(std::move(job));
+            if (!launch(job)) {
+                jobs_.push_front(std::move(job));
+                break;
+            }
         }
         reap_and_expire();
         while (!completions_.empty()) {

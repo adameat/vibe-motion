@@ -106,12 +106,15 @@ int main() {
     assert(comments.global.daemon);
     assert(comments.global.unknown_options.at("future") == "value with spaces");
 
-    const Config noise =
-        ConfigParser().parse_string("noise_level 64\nnoise_tune off\nmovie_all_frames off\n");
+    const Config noise = ConfigParser().parse_string(
+        "noise_level 64\nnoise_tune off\nmovie_all_frames off\ncamera cameras/rtmp.conf\n",
+        fixtures / "noise-main.conf");
     assert(noise.global.camera_defaults.noise_level == 64);
     assert(!noise.global.camera_defaults.noise_tune);
     assert(!noise.global.camera_defaults.movie_all_frames);
-    assert(deployment.dump_effective().find("noise_tune on") != std::string::npos);
+    const std::string noise_dump = noise.dump_effective();
+    assert(noise_dump.find("noise_tune off") != std::string::npos);
+    assert(noise_dump.find("movie_all_frames off") != std::string::npos);
 
     expect_config_error([] { ConfigParser().parse_string("daemon maybe\n"); });
     expect_config_error([&] { load_config(fixtures / "invalid-main.conf"); });

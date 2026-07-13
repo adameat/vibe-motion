@@ -84,7 +84,9 @@ class HookExecutor {
     };
 
     void run();
-    void launch(Job job);
+    // Returns false when the supervisor socket applies backpressure; the caller
+    // keeps the job queued and retries after a short wait.
+    bool launch(Job& job);
     void receive_supervisor_results();
     void reap_and_expire();
     void finish(std::size_t index, int status, int exec_error);
