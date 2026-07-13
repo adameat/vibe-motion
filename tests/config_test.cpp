@@ -23,6 +23,10 @@ template <typename Function> void expect_config_error(Function function) {
 } // namespace
 
 int main() {
+    assert(timelapse_file_extension("mkv") == ".mkv");
+    assert(timelapse_file_extension(" MPEG4 ") == ".avi");
+    expect_config_error([] { timelapse_file_extension("mpg"); });
+
     const auto fixtures = std::filesystem::path(__FILE__).parent_path() / "fixtures";
     const Config config = load_config(fixtures / "motion.conf");
 
@@ -64,6 +68,12 @@ int main() {
     assert(deployment.global.camera_defaults.movie_all_frames);
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
+
+    Config padded_container = deployment;
+    for (auto& camera : padded_container.cameras) {
+        camera.timelapse_container = " MPEG4 ";
+    }
+    padded_container.validate();
 
     const std::string safe = config.dump_effective();
     assert(safe.find("alice:secret") == std::string::npos);

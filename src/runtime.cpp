@@ -531,8 +531,10 @@ class CameraWorker {
                             timelapse.close(&error);
                             timelapse_hour = current_hour;
                             auto values = context(detection, frame, events.event_number());
-                            const auto path = output_path(config_.timelapse_filename, ".mpg",
-                                                          values, frame.captured_at);
+                            const auto path =
+                                output_path(config_.timelapse_filename,
+                                            timelapse_file_extension(config_.timelapse_container),
+                                            values, frame.captured_at);
                             std::filesystem::create_directories(path.parent_path());
                             if (!timelapse.open(path.string(), frame.width, frame.height,
                                                 config_.timelapse_fps, &error)) {

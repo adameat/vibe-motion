@@ -37,6 +37,31 @@ static void test_decoded_frame_quality() {
     assert(!detail::decoded_frame_usable(&frame));
 }
 
+static int count_decoded_frames(const std::filesystem::path& path) {
+    CameraSourceConfig config;
+    config.url = path.string();
+    config.width = 160;
+    config.height = 120;
+    NetworkCameraSource source(config);
+    std::string error;
+    assert(source.open(&error));
+    int frames = 0;
+    for (;;) {
+        auto result = source.read();
+        if (result.status == CameraReadStatus::end_of_stream)
+            break;
+        if (result.status == CameraReadStatus::again)
+            continue;
+        assert(result.status == CameraReadStatus::sample);
+        assert(result.sample);
+        if (result.sample->frame) {
+            ++frames;
+        }
+    }
+    source.close();
+    return frames;
+}
+
 int main(int, char** argv) {
     test_decoded_frame_quality();
     const auto directory = std::filesystem::path(argv[0]).parent_path();
@@ -46,9 +71,7 @@ int main(int, char** argv) {
         return 0;
     }
     const auto movie_path = directory / "media-event.mp4";
-    const auto timelapse_path = directory / "media-timelapse.mpg";
     std::filesystem::remove(movie_path);
-    std::filesystem::remove(timelapse_path);
 
     CameraSourceConfig config;
     config.url = input.string();
@@ -62,7 +85,6 @@ int main(int, char** argv) {
 
     PacketRing ring(std::chrono::seconds(10), 1000);
     EventMovieWriter movie;
-    TimelapseWriter timelapse;
     std::vector<GrayFrame> frames;
     bool movie_opened = false;
     bool overlay_tested = false;
@@ -110,12 +132,19 @@ int main(int, char** argv) {
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 
-    assert(timelapse.open(timelapse_path.string(), 160, 120, 1, &error));
-    for (std::size_t index = 0; index < std::min<std::size_t>(frames.size(), 5); ++index) {
-        assert(timelapse.write(frames[index], &error));
+    const auto timelapse_frames = std::min<std::size_t>(frames.size(), 5);
+    for (const std::string extension : {".mkv", ".avi"}) {
+        const auto timelapse_path = directory / ("media-timelapse" + extension);
+        std::filesystem::remove(timelapse_path);
+        TimelapseWriter timelapse;
+        assert(timelapse.open(timelapse_path.string(), 160, 120, 1, &error));
+        for (std::size_t index = 0; index < timelapse_frames; ++index) {
+            assert(timelapse.write(frames[index], &error));
+        }
+        assert(timelapse.close(&error));
+        assert(std::filesystem::file_size(timelapse_path) > 1000);
+        assert(count_decoded_frames(timelapse_path) == static_cast<int>(timelapse_frames));
     }
-    assert(timelapse.close(&error));
-    assert(std::filesystem::file_size(timelapse_path) > 1000);
     source.close();
 
     config.analysis_framerate = 2;

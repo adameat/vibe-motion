@@ -498,6 +498,17 @@ void append_strftime_literal(std::string& output, const std::string& value) {
 
 } // namespace
 
+std::string timelapse_file_extension(std::string container) {
+    container = lower(trim(std::move(container)));
+    if (container == "mkv") {
+        return ".mkv";
+    }
+    if (container == "mpeg4") {
+        return ".avi";
+    }
+    throw ConfigError("timelapse_container must be mkv or mpeg4");
+}
+
 ConfigParser::ConfigParser(ParseOptions options) : options_(options) {}
 
 Config ConfigParser::parse_file(const std::filesystem::path& path) const {
@@ -566,8 +577,10 @@ void Config::validate() const {
                     "timelapse_fps must be between 1 and 240");
         check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
                     "only hourly timelapse_mode is implemented");
-        check_range(c.timelapse_interval == 0 || lower(c.timelapse_container) == "mpeg4", c,
-                    "timelapse currently requires mpeg4 container");
+        const std::string timelapse_container = lower(trim(c.timelapse_container));
+        check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
+                        timelapse_container == "mpeg4",
+                    c, "timelapse_container must be mkv or mpeg4");
         check_range(c.stream_port >= 0 && c.stream_port <= 65535, c, "invalid stream_port");
         check_range(c.stream_maxrate > 0, c, "stream_maxrate must be positive");
     }
