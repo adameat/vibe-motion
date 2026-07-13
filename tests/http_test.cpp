@@ -13,6 +13,15 @@
 
 using namespace vibe_motion;
 
+static void send_all(int fd, const std::string& data) {
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const auto count = ::send(fd, data.data() + offset, data.size() - offset, 0);
+        assert(count > 0);
+        offset += static_cast<std::size_t>(count);
+    }
+}
+
 static std::string get(std::uint16_t port, const std::string& path) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
@@ -23,7 +32,7 @@ static std::string get(std::uint16_t port, const std::string& path) {
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
     const std::string request =
         "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    assert(::send(fd, request.data(), request.size(), 0) == static_cast<ssize_t>(request.size()));
+    send_all(fd, request);
     std::string response;
     char buffer[1024];
     for (;;) {
@@ -46,7 +55,7 @@ static std::string get_headers(std::uint16_t port, const std::string& path) {
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
     const std::string request =
         "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    assert(::send(fd, request.data(), request.size(), 0) == static_cast<ssize_t>(request.size()));
+    send_all(fd, request);
     std::string response;
     char buffer[1024];
     while (response.find("\r\n\r\n") == std::string::npos) {
@@ -85,6 +94,9 @@ int main() {
     const auto short_stream = get_headers(server.port(), "/7/mjpg");
     assert(short_stream.find("200 OK") != std::string::npos);
     assert(short_stream.find("multipart/x-mixed-replace") != std::string::npos);
+    const auto long_stream = get_headers(server.port(), "/7/mjpg/stream");
+    assert(long_stream.find("200 OK") != std::string::npos);
+    assert(long_stream.find("multipart/x-mixed-replace") != std::string::npos);
     server.stop();
 
     std::cout << "http tests passed\n";
