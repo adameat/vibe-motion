@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <unistd.h>
