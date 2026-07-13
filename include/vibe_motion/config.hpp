@@ -59,7 +59,7 @@ struct CameraConfig {
     std::string timelapse_mode = "daily";
     std::string timelapse_filename = "%Y%m%d-timelapse";
     int timelapse_fps = 30;
-    std::string timelapse_container = "mp4";
+    std::string timelapse_container = "mkv";
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 
@@ -128,6 +128,7 @@ class ConfigParser {
 };
 
 Config load_config(const std::filesystem::path& path, ParseOptions options = {});
+std::string timelapse_file_extension(std::string container);
 
 struct ExpansionContext {
     int camera_id = 0;              // %t

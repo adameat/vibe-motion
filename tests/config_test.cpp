@@ -23,6 +23,10 @@ template <typename Function> void expect_config_error(Function function) {
 } // namespace
 
 int main() {
+    assert(timelapse_file_extension("mkv") == ".mkv");
+    assert(timelapse_file_extension(" MPEG4 ") == ".avi");
+    expect_config_error([] { timelapse_file_extension("mpg"); });
+
     const auto fixtures = std::filesystem::path(__FILE__).parent_path() / "fixtures";
     const Config config = load_config(fixtures / "motion.conf");
 

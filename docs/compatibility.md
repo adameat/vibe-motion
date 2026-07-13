@@ -12,7 +12,7 @@ is included or copied.
 | Sources | RTMP and RTSP, TCP transport option, input dictionary parameters, timeout and reconnect |
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
 | Event lifecycle | `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
-| Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MPEG-4 timelapse, automatic parent directories |
+| Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MKV/AVI MPEG-4 timelapse, automatic parent directories |
 | Hooks | event start/end, picture save, movie start/end; asynchronous argv execution and exit logging |
 | HTTP | one global listener, read-only status, latest JPEG, per-camera multipart MJPEG |
 | Operations | foreground/systemd operation, structured logs, signal shutdown, HUP reload, per-camera failure isolation |
@@ -35,8 +35,9 @@ is included or copied.
   best-event JPEGs. `text_*` overlays and HTTP `stream_preview_scale` are parsed
   but are not rendered/applied yet.
 - Only `picture_output best`, unlimited passthrough MP4/MKV event movies, and
-  hourly MPEG-4 timelapse are accepted. Other parsed output modes fail config
-  validation instead of silently behaving differently.
+  hourly MPEG-4 timelapse in MKV (recommended) or AVI (`mpeg4` compatibility)
+  are accepted. Other parsed output modes fail config validation instead of
+  silently behaving differently.
 - The read-only HTTP routes are behavior-oriented; this is not a byte-for-byte
   clone of Motion's HTML interface or combined camera grid.
 

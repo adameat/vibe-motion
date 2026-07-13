@@ -7,6 +7,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/log.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
@@ -24,6 +25,15 @@ extern "C" {
 
 namespace vibe_motion {
 namespace {
+
+void configure_ffmpeg_logging() noexcept {
+    static const bool configured = [] {
+        av_log_set_level(AV_LOG_ERROR);
+        av_log_set_flags(av_log_get_flags() | AV_LOG_SKIP_REPEATED);
+        return true;
+    }();
+    (void)configured;
+}
 
 std::string ff_error(int code) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -457,7 +467,9 @@ struct NetworkCameraSource::Impl {
 };
 
 NetworkCameraSource::NetworkCameraSource(CameraSourceConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+    : impl_(std::make_unique<Impl>(std::move(config))) {
+    configure_ffmpeg_logging();
+}
 NetworkCameraSource::~NetworkCameraSource() = default;
 NetworkCameraSource::NetworkCameraSource(NetworkCameraSource&&) noexcept = default;
 NetworkCameraSource& NetworkCameraSource::operator=(NetworkCameraSource&&) noexcept = default;
@@ -820,7 +832,9 @@ struct EventMovieWriter::Impl {
     }
 };
 
-EventMovieWriter::EventMovieWriter() : impl_(std::make_unique<Impl>()) {}
+EventMovieWriter::EventMovieWriter() : impl_(std::make_unique<Impl>()) {
+    configure_ffmpeg_logging();
+}
 EventMovieWriter::~EventMovieWriter() = default;
 EventMovieWriter::EventMovieWriter(EventMovieWriter&&) noexcept = default;
 EventMovieWriter& EventMovieWriter::operator=(EventMovieWriter&&) noexcept = default;
@@ -914,6 +928,9 @@ struct TimelapseWriter::Impl {
                 return false;
             }
             av_packet_rescale_ts(packet.get(), encoder->time_base, stream->time_base);
+            if (packet->duration <= 0) {
+                packet->duration = av_rescale_q(1, encoder->time_base, stream->time_base);
+            }
             packet->stream_index = stream->index;
             const int write_result = av_interleaved_write_frame(format, packet.get());
             av_packet_unref(packet.get());
@@ -928,23 +945,7 @@ struct TimelapseWriter::Impl {
         bool success = true;
         if (format != nullptr) {
             if (encoder && header_written) {
-                // MPEG-4/MP4 derives the final sample duration from the next
-                // timestamp. Submit a hold frame as an end marker; the muxer
-                // marks that sentinel disposable while retaining every frame
-                // supplied by the caller.
-                int result = 0;
-                if (next_pts > 0 && encoded_frame) {
-                    encoded_frame->pts = next_pts;
-                    result = avcodec_send_frame(encoder.get(), encoded_frame.get());
-                    if (result >= 0) {
-                        try {
-                            success = drain(error) && success;
-                        } catch (...) {
-                            success = false;
-                        }
-                    }
-                }
-                result = avcodec_send_frame(encoder.get(), nullptr);
+                int result = avcodec_send_frame(encoder.get(), nullptr);
                 if (result >= 0) {
                     try {
                         success = drain(error) && success;
@@ -978,7 +979,9 @@ struct TimelapseWriter::Impl {
     }
 };
 
-TimelapseWriter::TimelapseWriter() : impl_(std::make_unique<Impl>()) {}
+TimelapseWriter::TimelapseWriter() : impl_(std::make_unique<Impl>()) {
+    configure_ffmpeg_logging();
+}
 TimelapseWriter::~TimelapseWriter() = default;
 TimelapseWriter::TimelapseWriter(TimelapseWriter&&) noexcept = default;
 TimelapseWriter& TimelapseWriter::operator=(TimelapseWriter&&) noexcept = default;

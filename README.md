@@ -82,6 +82,9 @@ systemd service remain visibly named `vibe-motion`.
 - MP4 passthrough begins from the latest buffered keyframe and rebases packet
   timestamps. This is the most important part to validate for every camera
   codec before production cutover.
+- `timelapse_container mkv` is recommended for hourly timelapse output. The
+  Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
+  for MPEG-4 timelapses.
 - Detection is behavior-compatible, not pixel-identical to Motion. Thresholds
   should be tuned against representative clips before migration.
 
