@@ -64,8 +64,8 @@ class VideoPacket {
     friend class EventMovieWriter;
 };
 
-// A reference-counted decoded color frame retained only for the duration of a
-// camera sample. It allows overlays to be rendered after motion analysis.
+// A reference-counted decoded color frame. Copies retain the underlying frame
+// data independently of the camera source and may outlive the originating sample.
 class DecodedImage {
   public:
     DecodedImage();
@@ -82,6 +82,7 @@ class DecodedImage {
     std::unique_ptr<Impl> impl_;
     explicit DecodedImage(std::unique_ptr<Impl> impl);
     friend class NetworkCameraSource;
+    friend class TimelapseWriter;
 };
 
 struct RedBox {
@@ -190,7 +191,7 @@ class TimelapseWriter {
     // The caller chooses the path and therefore controls hourly rotation.
     bool open(const std::string& path, int width, int height, int fps,
               std::string* error = nullptr);
-    bool write(const GrayFrame& frame, std::string* error = nullptr);
+    bool write(const DecodedImage& image, std::string* error = nullptr);
     bool close(std::string* error = nullptr) noexcept;
     bool is_open() const noexcept;
 

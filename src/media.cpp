@@ -1046,15 +1046,19 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     return true;
 }
 
-bool TimelapseWriter::write(const GrayFrame& frame, std::string* error) {
+bool TimelapseWriter::write(const DecodedImage& image, std::string* error) {
     if (!is_open()) {
         set_error(error, "timelapse writer is not open");
         return false;
     }
-    if (frame.width <= 0 || frame.height <= 0 ||
-        frame.pixels.size() <
-            static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height)) {
-        set_error(error, "invalid grayscale timelapse frame");
+    if (!image.valid()) {
+        set_error(error, "invalid color timelapse frame");
+        return false;
+    }
+    const AVFrame* source = image.impl_->frame.get();
+    if (source->width <= 0 || source->height <= 0 || source->format < 0 ||
+        source->data[0] == nullptr) {
+        set_error(error, "invalid color timelapse frame");
         return false;
     }
     if (av_frame_make_writable(impl_->encoded_frame.get()) < 0) {
@@ -1062,16 +1066,18 @@ bool TimelapseWriter::write(const GrayFrame& frame, std::string* error) {
         return false;
     }
     impl_->scaler = sws_getCachedContext(
-        impl_->scaler, frame.width, frame.height, AV_PIX_FMT_GRAY8, impl_->encoder->width,
-        impl_->encoder->height, impl_->encoder->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
+        impl_->scaler, source->width, source->height, static_cast<AVPixelFormat>(source->format),
+        impl_->encoder->width, impl_->encoder->height, impl_->encoder->pix_fmt, SWS_BILINEAR,
+        nullptr, nullptr, nullptr);
     if (!impl_->scaler) {
         set_error(error, "cannot create timelapse scaler");
         return false;
     }
-    const std::uint8_t* source[] = {frame.pixels.data(), nullptr, nullptr, nullptr};
-    int source_lines[] = {frame.width, 0, 0, 0};
-    sws_scale(impl_->scaler, source, source_lines, 0, frame.height, impl_->encoded_frame->data,
-              impl_->encoded_frame->linesize);
+    if (sws_scale(impl_->scaler, source->data, source->linesize, 0, source->height,
+                  impl_->encoded_frame->data, impl_->encoded_frame->linesize) <= 0) {
+        set_error(error, "cannot convert color timelapse frame");
+        return false;
+    }
     impl_->encoded_frame->pts = impl_->next_pts++;
     const int result = avcodec_send_frame(impl_->encoder.get(), impl_->encoded_frame.get());
     if (result < 0) {
