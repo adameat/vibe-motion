@@ -64,8 +64,8 @@ class VideoPacket {
     friend class EventMovieWriter;
 };
 
-// A reference-counted decoded color frame retained only for the duration of a
-// camera sample. It allows overlays to be rendered after motion analysis.
+// A reference-counted decoded color frame. Copies retain the underlying frame
+// data independently of the camera source and may outlive the originating sample.
 class DecodedImage {
   public:
     DecodedImage();

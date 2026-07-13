@@ -11,6 +11,8 @@ extern "C" {
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
