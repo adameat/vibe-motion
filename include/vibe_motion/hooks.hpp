@@ -47,6 +47,8 @@ using HookCompletion = std::function<void(const HookResult&)>;
 
 class HookExecutor {
   public:
+    // Construct while the process is single-threaded. The persistent hook
+    // supervisor is initialized directly in the forked child.
     explicit HookExecutor(HookExecutorOptions options = {});
     ~HookExecutor();
 
@@ -72,8 +74,8 @@ class HookExecutor {
         HookCompletion completion;
     };
     struct Child {
+        std::uint64_t job_id = 0;
         pid_t pid = -1;
-        int error_fd = -1;
         std::chrono::steady_clock::time_point started;
         std::chrono::steady_clock::time_point terminated;
         bool timed_out = false;
@@ -82,9 +84,15 @@ class HookExecutor {
     };
 
     void run();
-    void launch(Job job);
+    // Returns false when the supervisor socket applies backpressure; the caller
+    // keeps the job queued and retries after a short wait.
+    bool launch(Job& job);
+    void receive_supervisor_results();
     void reap_and_expire();
     void finish(std::size_t index, int status, int exec_error);
+    void fail_supervisor(int error);
+    void reap_supervisor_nonblocking() noexcept;
+    void stop_supervisor() noexcept;
 
     HookExecutorOptions options_;
     mutable std::mutex mutex_;
@@ -94,6 +102,10 @@ class HookExecutor {
     std::vector<Child> children_;
     std::deque<std::pair<HookCompletion, HookResult>> completions_;
     bool stopping_ = false;
+    int supervisor_socket_ = -1;
+    pid_t supervisor_pid_ = -1;
+    std::uint64_t next_job_id_ = 1;
+    bool supervisor_failed_ = false;
     std::thread worker_;
 };
 

@@ -32,6 +32,7 @@ struct CameraConfig {
     int threshold = 1500;
     bool threshold_tune = false;
     int noise_level = 32;
+    bool noise_tune = true;
     std::string despeckle_filter;
     int lightswitch_percent = 0;
     int minimum_motion_frames = 1;
@@ -45,6 +46,7 @@ struct CameraConfig {
     std::string picture_filename = "%v-%Y%m%d%H%M%S-%q";
     bool movie_output = true;
     bool movie_passthrough = false;
+    bool movie_all_frames = true;
     bool movie_duplicate_frames = false;
     int movie_max_time = 0;
     int movie_quality = 75;

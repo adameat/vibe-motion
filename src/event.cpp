@@ -23,6 +23,12 @@ EventDecision EventStateMachine::update(bool qualifying_motion,
 
     const bool confirmed =
         qualifying_motion && consecutive_motion_ >= settings_.minimum_motion_frames;
+    // minimum_motion_frames qualifies the initial trigger. Once an event is
+    // active, Motion refreshes its gap timer on every raw motion frame, even an
+    // isolated one that does not form another qualifying run.
+    if (active_ && qualifying_motion) {
+        last_motion_ = now;
+    }
     if (confirmed) {
         decision.motion_detected = true;
         last_motion_ = now;

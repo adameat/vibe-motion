@@ -175,6 +175,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.threshold_tune = boolean(value, location, key);
     else if (key == "noise_level")
         c.noise_level = integer(value, location, key);
+    else if (key == "noise_tune")
+        c.noise_tune = boolean(value, location, key);
     else if (key == "despeckle_filter")
         c.despeckle_filter = value;
     else if (key == "lightswitch_percent")
@@ -207,6 +209,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.movie_output = boolean(value, location, key);
     else if (key == "movie_passthrough")
         c.movie_passthrough = boolean(value, location, key);
+    else if (key == "movie_all_frames")
+        c.movie_all_frames = boolean(value, location, key);
     else if (key == "movie_duplicate_frames")
         c.movie_duplicate_frames = boolean(value, location, key);
     else if (key == "movie_max_time")
@@ -429,6 +433,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "threshold " << c.threshold << '\n'
         << "threshold_tune " << bool_text(c.threshold_tune) << '\n'
         << "noise_level " << c.noise_level << '\n'
+        << "noise_tune " << bool_text(c.noise_tune) << '\n'
         << "despeckle_filter " << c.despeckle_filter << '\n'
         << "lightswitch_percent " << c.lightswitch_percent << '\n'
         << "minimum_motion_frames " << c.minimum_motion_frames << '\n'
@@ -440,6 +445,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "picture_filename " << c.picture_filename << '\n'
         << "movie_output " << bool_text(c.movie_output) << '\n'
         << "movie_passthrough " << bool_text(c.movie_passthrough) << '\n'
+        << "movie_all_frames " << bool_text(c.movie_all_frames) << '\n'
         << "movie_duplicate_frames " << bool_text(c.movie_duplicate_frames) << '\n'
         << "movie_max_time " << c.movie_max_time << '\n'
         << "movie_quality " << c.movie_quality << '\n'
@@ -537,8 +543,9 @@ void Config::validate() const {
                     "framerate must be between 1 and 240");
         check_range(c.text_scale > 0, c, "text_scale must be positive");
         check_range(!c.emulate_motion, c, "emulate_motion is not implemented");
-        check_range(c.threshold >= 0 && c.noise_level >= 0, c,
-                    "threshold and noise_level cannot be negative");
+        check_range(c.threshold >= 0, c, "threshold cannot be negative");
+        check_range(c.noise_level >= 0 && c.noise_level <= 255, c,
+                    "noise_level must be between 0 and 255");
         check_range(c.lightswitch_percent >= 0 && c.lightswitch_percent <= 100, c,
                     "lightswitch_percent must be between 0 and 100");
         check_range(c.minimum_motion_frames > 0, c, "minimum_motion_frames must be positive");

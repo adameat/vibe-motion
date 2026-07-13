@@ -1,6 +1,7 @@
 #include "vibe_motion/detection.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -28,6 +29,7 @@ MotionDetector::MotionDetector(DetectionSettings settings) : settings_(settings)
     if (settings_.background_alpha <= 0.0 || settings_.background_alpha > 1.0) {
         throw std::invalid_argument("background_alpha must be in (0, 1]");
     }
+    effective_noise_level_ = static_cast<double>(settings_.noise_level);
 }
 
 void MotionDetector::set_mask(int width, int height, std::vector<std::uint8_t> enabled) {
@@ -41,6 +43,9 @@ void MotionDetector::set_mask(int width, int height, std::vector<std::uint8_t> e
     active_mask_pixels_ = static_cast<std::size_t>(
         std::count_if(mask_.begin(), mask_.end(), [](std::uint8_t value) { return value != 0; }));
     background_.clear();
+    effective_noise_level_ = static_cast<double>(settings_.noise_level);
+    noise_estimate_initialized_ = false;
+    upward_noise_frames_ = 0;
 }
 
 void MotionDetector::load_pgm_mask(const std::filesystem::path& path, int expected_width,
@@ -81,6 +86,9 @@ void MotionDetector::reset() {
     background_.clear();
     changed_.clear();
     background_changes_ = 0.0;
+    effective_noise_level_ = static_cast<double>(settings_.noise_level);
+    noise_estimate_initialized_ = false;
+    upward_noise_frames_ = 0;
 }
 
 DetectionResult MotionDetector::process(const GrayFrame& frame) {
@@ -97,11 +105,75 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
     if (background_.empty()) {
         background_.assign(frame.pixels.begin(), frame.pixels.end());
         changed_.resize(frame.pixels.size());
-        return {};
+        DetectionResult result;
+        result.effective_threshold = settings_.threshold;
+        result.effective_noise_level = settings_.noise_level;
+        return result;
     }
 
     changed_.resize(frame.pixels.size());
-    const float noise_level = static_cast<float>(settings_.noise_level);
+    // Estimate codec/sensor noise from a bounded sample of raw background
+    // differences. The median remains representative with a large moving
+    // minority, while the multiplier leaves headroom above ordinary noise. A
+    // local histogram keeps this allocation-free and cheap for large frames.
+    double upward_noise_candidate = -1.0;
+    if (settings_.noise_tune) {
+        constexpr std::size_t target_samples = 4096;
+        const auto stride = std::max<std::size_t>(1, pixel_count / target_samples);
+        std::array<std::uint32_t, 256> histogram{};
+        std::size_t samples = 0;
+        for (std::size_t index = 0; index < pixel_count; index += stride) {
+            if (!mask_.empty() && mask_[index] == 0) {
+                continue;
+            }
+            float difference =
+                std::abs(static_cast<float>(frame.pixels[index]) - background_[index]);
+            if (!mask_.empty()) {
+                difference *= static_cast<float>(mask_[index]) / 255.0F;
+            }
+            const auto bucket = static_cast<std::size_t>(
+                std::clamp(static_cast<int>(std::lround(difference)), 0, 255));
+            ++histogram[bucket];
+            ++samples;
+        }
+
+        if (samples > 0) {
+            const auto rank = (samples + 1) / 2;
+            std::size_t cumulative = 0;
+            std::size_t percentile = 0;
+            for (; percentile < histogram.size(); ++percentile) {
+                cumulative += histogram[percentile];
+                if (cumulative >= rank) {
+                    break;
+                }
+            }
+            const double maximum = static_cast<double>(settings_.noise_level);
+            // Keep quantization shimmer below the change map. In practice the
+            // reference Motion estimator settles around 12 even on quiet
+            // compressed feeds; going lower also makes lightswitch suppression
+            // swallow large, legitimate foreground changes.
+            const double minimum = std::min(12.0, maximum);
+            const double candidate =
+                std::clamp(12.0 + static_cast<double>(percentile) * 3.0, minimum, maximum);
+            if (!noise_estimate_initialized_) {
+                // The configured level is an initial safety ceiling. The first
+                // representative frame should make tuning useful immediately.
+                effective_noise_level_ = candidate;
+                noise_estimate_initialized_ = true;
+            } else if (candidate <= effective_noise_level_) {
+                // Falling noise is safe to follow promptly.
+                effective_noise_level_ += (candidate - effective_noise_level_) * 0.35;
+                upward_noise_frames_ = 0;
+            } else {
+                upward_noise_candidate = candidate;
+            }
+        }
+    } else {
+        effective_noise_level_ = static_cast<double>(settings_.noise_level);
+    }
+    const auto effective_noise =
+        static_cast<std::uint8_t>(std::clamp(std::lround(effective_noise_level_), 0L, 255L));
+    const float noise_level = static_cast<float>(effective_noise);
     if (mask_.empty()) {
         // This is the overwhelmingly common path. Keep the mask test out of its
         // inner loop so every iteration performs only the pixel comparison.
@@ -125,6 +197,7 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
     }
 
     DetectionResult result;
+    result.effective_noise_level = effective_noise;
     int min_x = width_;
     int min_y = height_;
     int max_x = -1;
@@ -215,6 +288,20 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
                                         lower, upper)
             : base;
     result.motion = result.changed_pixels > result.effective_threshold;
+
+    if (upward_noise_candidate >= 0.0) {
+        // A single moving object or lightswitch can dominate even a robust
+        // percentile. Suppress those frames, otherwise require persistence and
+        // rise slowly so sustained codec/sensor noise still gets tracked.
+        if (result.motion || result.lightswitch_suppressed) {
+            upward_noise_frames_ = 0;
+        } else {
+            ++upward_noise_frames_;
+            if (upward_noise_frames_ >= 5) {
+                effective_noise_level_ += (upward_noise_candidate - effective_noise_level_) * 0.18;
+            }
+        }
+    }
 
     const float alpha = static_cast<float>(result.motion ? settings_.background_alpha * 0.1
                                                          : settings_.background_alpha);

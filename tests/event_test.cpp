@@ -21,6 +21,15 @@ int main() {
     decision = state.update(false, start + 32s);
     assert(decision.event_ended && !state.active());
 
+    EventStateMachine intermittent({3, 30s, 0});
+    intermittent.update(true, start);
+    intermittent.update(true, start + 1s);
+    assert(intermittent.update(true, start + 2s).event_started);
+    intermittent.update(false, start + 3s);
+    intermittent.update(true, start + 31s);
+    assert(!intermittent.update(false, start + 32s).event_ended);
+    assert(intermittent.update(false, start + 61s).event_ended);
+
     state.update(true, start + 40s);
     state.update(true, start + 41s);
     decision = state.update(true, start + 42s);

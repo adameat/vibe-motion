@@ -21,6 +21,7 @@ int main() {
     DetectionSettings settings;
     settings.threshold = 3;
     settings.noise_level = 10;
+    settings.noise_tune = false;
     settings.despeckle = false;
     MotionDetector detector(settings);
 
@@ -76,6 +77,7 @@ int main() {
 
     DetectionSettings lightswitch_settings;
     lightswitch_settings.noise_level = 10;
+    lightswitch_settings.noise_tune = false;
     lightswitch_settings.despeckle = false;
     lightswitch_settings.lightswitch_percent = 50;
     MotionDetector lightswitch(lightswitch_settings);
@@ -89,6 +91,69 @@ int main() {
     const auto suppressed = lightswitch.process(one_of_two);
     assert(suppressed.lightswitch_suppressed);
     assert(suppressed.changed_pixels == 0);
+
+    // Adaptive noise tuning rapidly replaces Motion's deliberately generous
+    // configured ceiling with a level representative of static codec noise.
+    DetectionSettings adaptive_settings;
+    adaptive_settings.threshold = 1000;
+    adaptive_settings.noise_level = 128;
+    adaptive_settings.despeckle = false;
+    MotionDetector adaptive(adaptive_settings);
+    const auto initial = adaptive.process(frame(64, 64, 100));
+    assert(initial.effective_threshold == adaptive_settings.threshold);
+    assert(initial.effective_noise_level == adaptive_settings.noise_level);
+    auto codec_noise = frame(64, 64, 100);
+    for (std::size_t index = 0; index < codec_noise.pixels.size(); ++index) {
+        codec_noise.pixels[index] =
+            static_cast<std::uint8_t>(100 + static_cast<int>(index % 11) - 5);
+    }
+    auto tuned = adaptive.process(codec_noise);
+    assert(tuned.effective_noise_level >= 10);
+    assert(tuned.effective_noise_level <= 24);
+
+    // A transient large moving region must not inflate the learned level.
+    const auto before_motion = tuned.effective_noise_level;
+    auto large_motion = codec_noise;
+    for (std::size_t index = 0; index < large_motion.pixels.size() * 3 / 5; ++index) {
+        large_motion.pixels[index] = 220;
+    }
+    const auto during_motion = adaptive.process(large_motion);
+    assert(during_motion.effective_noise_level == before_motion);
+    assert(during_motion.motion);
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        assert(adaptive.process(large_motion).effective_noise_level == before_motion);
+    }
+
+    // Persistently noisier input is eventually followed, but only after the
+    // upward hysteresis has rejected short-lived motion.
+    std::uint8_t noisier_level = during_motion.effective_noise_level;
+    // Keep the test threshold above random-speckle activity: this models a
+    // persistent noisy-but-static feed rather than a detected object.
+    adaptive_settings.threshold = 10000;
+    MotionDetector noisy_adaptive(adaptive_settings);
+    noisy_adaptive.process(frame(64, 64, 100));
+    noisy_adaptive.process(codec_noise);
+    const auto quiet_level = noisy_adaptive.process(codec_noise).effective_noise_level;
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        auto noisier = frame(64, 64, 100);
+        const int sign = iteration % 2 == 0 ? 1 : -1;
+        for (std::size_t index = 0; index < noisier.pixels.size(); ++index) {
+            const int magnitude = 11 + static_cast<int>(index % 4);
+            noisier.pixels[index] = static_cast<std::uint8_t>(100 + sign * magnitude);
+        }
+        noisier_level = noisy_adaptive.process(noisier).effective_noise_level;
+    }
+    assert(noisier_level > quiet_level);
+
+    // With tuning disabled the configured level is exact and stable.
+    DetectionSettings fixed_settings;
+    fixed_settings.threshold = 10000;
+    fixed_settings.noise_level = 37;
+    fixed_settings.noise_tune = false;
+    fixed_settings.despeckle = false;
+    MotionDetector fixed(fixed_settings);
+    assert(fixed.process(frame(16, 16, 80)).effective_noise_level == 37);
+    assert(fixed.process(frame(16, 16, 120)).effective_noise_level == 37);
 
     std::cout << "detection tests passed\n";
 }
