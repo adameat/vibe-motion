@@ -62,8 +62,8 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
         if (result.sample->frame) {
             ++stats.frames;
             assert(result.sample->image);
-            stats.has_color =
-                stats.has_color || detail::decoded_image_has_color(*result.sample->image);
+            const AVFrame* decoded = detail::DecodedImageAccess::frame(*result.sample->image);
+            stats.has_color = stats.has_color || detail::decoded_frame_has_color(decoded);
         }
     }
     source.close();
@@ -94,6 +94,7 @@ int main(int, char** argv) {
     PacketRing ring(std::chrono::seconds(10), 1000);
     EventMovieWriter movie;
     std::vector<DecodedImage> images;
+    constexpr std::size_t timelapse_frame_limit = 5;
     bool movie_opened = false;
     bool overlay_tested = false;
     int samples = 0;
@@ -113,7 +114,9 @@ int main(int, char** argv) {
             const auto jpeg = source.render_jpeg(*sample.image);
             assert(jpeg.size() > 4);
             assert(jpeg[0] == 0xff && jpeg[1] == 0xd8);
-            images.push_back(*sample.image);
+            if (images.size() < timelapse_frame_limit) {
+                images.push_back(*sample.image);
+            }
             if (!overlay_tested && sample.image) {
                 const auto annotated =
                     source.render_jpeg(*sample.image, RedBox{20, 20, 100, 80, 4});
@@ -140,7 +143,8 @@ int main(int, char** argv) {
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 
-    const auto timelapse_frames = std::min<std::size_t>(images.size(), 5);
+    assert(images.size() == timelapse_frame_limit);
+    const auto timelapse_frames = images.size();
     for (const std::string extension : {".mkv", ".avi"}) {
         const auto timelapse_path = directory / ("media-timelapse" + extension);
         std::filesystem::remove(timelapse_path);

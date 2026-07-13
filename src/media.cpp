@@ -240,11 +240,14 @@ bool DecodedImage::valid() const noexcept {
     return impl_ && impl_->frame;
 }
 
-bool detail::decoded_image_has_color(const DecodedImage& image) noexcept {
-    if (!image.valid()) {
+const AVFrame* detail::DecodedImageAccess::frame(const DecodedImage& image) noexcept {
+    return image.valid() ? image.impl_->frame.get() : nullptr;
+}
+
+bool detail::decoded_frame_has_color(const AVFrame* frame) noexcept {
+    if (frame == nullptr) {
         return false;
     }
-    const AVFrame* frame = image.impl_->frame.get();
     const auto pixel_format = static_cast<AVPixelFormat>(frame->format);
     if (pixel_format != AV_PIX_FMT_YUV420P && pixel_format != AV_PIX_FMT_YUVJ420P) {
         return false;

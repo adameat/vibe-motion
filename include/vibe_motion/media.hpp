@@ -13,11 +13,9 @@
 
 namespace vibe_motion {
 
-class DecodedImage;
-
 namespace detail {
 
-bool decoded_image_has_color(const DecodedImage& image) noexcept;
+struct DecodedImageAccess;
 
 } // namespace detail
 
@@ -89,7 +87,7 @@ class DecodedImage {
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit DecodedImage(std::unique_ptr<Impl> impl);
-    friend bool detail::decoded_image_has_color(const DecodedImage& image) noexcept;
+    friend struct detail::DecodedImageAccess;
     friend class NetworkCameraSource;
     friend class TimelapseWriter;
 };
