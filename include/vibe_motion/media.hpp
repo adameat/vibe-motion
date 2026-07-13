@@ -13,12 +13,6 @@
 
 namespace vibe_motion {
 
-namespace detail {
-
-struct DecodedImageAccess;
-
-} // namespace detail
-
 // FFmpeg objects are deliberately hidden from this interface.  This keeps the
 // rest of the daemon independent of FFmpeg headers and makes ownership clear.
 class StreamInfo {
@@ -82,12 +76,12 @@ class DecodedImage {
     ~DecodedImage();
 
     bool valid() const noexcept;
+    bool has_color() const noexcept;
 
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit DecodedImage(std::unique_ptr<Impl> impl);
-    friend struct detail::DecodedImageAccess;
     friend class NetworkCameraSource;
     friend class TimelapseWriter;
 };

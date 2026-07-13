@@ -62,8 +62,7 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
         if (result.sample->frame) {
             ++stats.frames;
             assert(result.sample->image);
-            const AVFrame* decoded = detail::DecodedImageAccess::frame(*result.sample->image);
-            stats.has_color = stats.has_color || detail::decoded_frame_has_color(decoded);
+            stats.has_color = stats.has_color || result.sample->image->has_color();
         }
     }
     source.close();

@@ -240,29 +240,45 @@ bool DecodedImage::valid() const noexcept {
     return impl_ && impl_->frame;
 }
 
-const AVFrame* detail::DecodedImageAccess::frame(const DecodedImage& image) noexcept {
-    return image.valid() ? image.impl_->frame.get() : nullptr;
-}
-
-bool detail::decoded_frame_has_color(const AVFrame* frame) noexcept {
-    if (frame == nullptr) {
+bool DecodedImage::has_color() const noexcept {
+    if (!valid()) {
+        return false;
+    }
+    const AVFrame* frame = impl_->frame.get();
+    if (frame->width <= 0 || frame->height <= 0 || frame->format < 0) {
+        return false;
+    }
+    auto converted = make_frame();
+    if (!converted || !allocate_video_frame(converted.get(), AV_PIX_FMT_YUV420P, frame->width,
+                                            frame->height, nullptr)) {
         return false;
     }
     const auto pixel_format = static_cast<AVPixelFormat>(frame->format);
-    if (pixel_format != AV_PIX_FMT_YUV420P && pixel_format != AV_PIX_FMT_YUVJ420P) {
+    SwsContext* scaler =
+        sws_getContext(frame->width, frame->height, pixel_format, frame->width, frame->height,
+                       AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (scaler == nullptr) {
         return false;
     }
-    const int width = (frame->width + 1) / 2;
-    const int height = (frame->height + 1) / 2;
+    const int scaled = sws_scale(scaler, frame->data, frame->linesize, 0, frame->height,
+                                 converted->data, converted->linesize);
+    sws_freeContext(scaler);
+    if (scaled <= 0) {
+        return false;
+    }
+
+    const int chroma_width = (frame->width + 1) / 2;
+    const int chroma_height = (frame->height + 1) / 2;
     for (int plane = 1; plane <= 2; ++plane) {
-        if (frame->data[plane] == nullptr) {
-            return false;
-        }
-        for (int row = 0; row < height; ++row) {
-            const auto* pixels =
-                frame->data[plane] + static_cast<std::ptrdiff_t>(row) * frame->linesize[plane];
-            if (std::any_of(pixels, pixels + width,
-                            [](std::uint8_t value) { return value != 128; })) {
+        for (int row = 0; row < chroma_height; ++row) {
+            const auto* pixels = converted->data[plane] +
+                                 static_cast<std::ptrdiff_t>(row) * converted->linesize[plane];
+            if (std::any_of(pixels, pixels + chroma_width, [](std::uint8_t value) {
+                    constexpr int neutral = 128;
+                    constexpr int tolerance = 8;
+                    const int chroma = value;
+                    return chroma < neutral - tolerance || chroma > neutral + tolerance;
+                })) {
                 return true;
             }
         }
