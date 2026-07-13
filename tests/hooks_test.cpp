@@ -54,5 +54,13 @@ int main() {
     final_name_input >> final_process_name;
     assert(!original_process_name.empty() && final_process_name == original_process_name);
 
+    HookExecutor stopping_executor({1, 4, 5s, 100ms, "motion"});
+    assert(stopping_executor.submit(std::vector<std::string>{"/bin/sleep", "5"}));
+    for (int attempt = 0; attempt < 100 && stopping_executor.running() == 0; ++attempt) {
+        std::this_thread::sleep_for(1ms);
+    }
+    assert(stopping_executor.running() == 1);
+    stopping_executor.stop();
+
     std::cout << "hook tests passed\n";
 }

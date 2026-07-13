@@ -360,7 +360,7 @@ void HookExecutor::stop() {
         stopping_ = true;
         jobs_.clear();
         for (auto& child : children_) {
-            if (!child.timed_out) {
+            if (child.pid > 0 && !child.timed_out) {
                 (void)::kill(-child.pid, SIGTERM);
                 child.timed_out = true;
                 child.terminated = std::chrono::steady_clock::now();

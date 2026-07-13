@@ -106,6 +106,7 @@ DetectionResult MotionDetector::process(const GrayFrame& frame) {
         background_.assign(frame.pixels.begin(), frame.pixels.end());
         changed_.resize(frame.pixels.size());
         DetectionResult result;
+        result.effective_threshold = settings_.threshold;
         result.effective_noise_level = settings_.noise_level;
         return result;
     }

@@ -99,7 +99,9 @@ int main() {
     adaptive_settings.noise_level = 128;
     adaptive_settings.despeckle = false;
     MotionDetector adaptive(adaptive_settings);
-    assert(adaptive.process(frame(64, 64, 100)).effective_noise_level == 128);
+    const auto initial = adaptive.process(frame(64, 64, 100));
+    assert(initial.effective_threshold == adaptive_settings.threshold);
+    assert(initial.effective_noise_level == adaptive_settings.noise_level);
     auto codec_noise = frame(64, 64, 100);
     for (std::size_t index = 0; index < codec_noise.pixels.size(); ++index) {
         codec_noise.pixels[index] =
