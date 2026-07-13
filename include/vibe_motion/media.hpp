@@ -13,6 +13,14 @@
 
 namespace vibe_motion {
 
+class DecodedImage;
+
+namespace detail {
+
+bool decoded_image_has_color(const DecodedImage& image) noexcept;
+
+} // namespace detail
+
 // FFmpeg objects are deliberately hidden from this interface.  This keeps the
 // rest of the daemon independent of FFmpeg headers and makes ownership clear.
 class StreamInfo {
@@ -81,7 +89,9 @@ class DecodedImage {
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit DecodedImage(std::unique_ptr<Impl> impl);
+    friend bool detail::decoded_image_has_color(const DecodedImage& image) noexcept;
     friend class NetworkCameraSource;
+    friend class TimelapseWriter;
 };
 
 struct RedBox {
@@ -190,7 +200,7 @@ class TimelapseWriter {
     // The caller chooses the path and therefore controls hourly rotation.
     bool open(const std::string& path, int width, int height, int fps,
               std::string* error = nullptr);
-    bool write(const GrayFrame& frame, std::string* error = nullptr);
+    bool write(const DecodedImage& image, std::string* error = nullptr);
     bool close(std::string* error = nullptr) noexcept;
     bool is_open() const noexcept;
 

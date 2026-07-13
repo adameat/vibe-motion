@@ -544,10 +544,17 @@ class CameraWorker {
                             }
                         }
                         std::string error;
-                        if (timelapse.is_open() && !timelapse.write(frame, &error)) {
-                            Logger::instance().write(LogLevel::warning, "camera ",
-                                                     config_.camera_id,
-                                                     ": timelapse write: ", redact_secrets(error));
+                        if (timelapse.is_open()) {
+                            if (!sample.image) {
+                                error = "decoded color frame is unavailable";
+                            } else if (timelapse.write(*sample.image, &error)) {
+                                error.clear();
+                            }
+                            if (!error.empty()) {
+                                Logger::instance().write(
+                                    LogLevel::warning, "camera ", config_.camera_id,
+                                    ": timelapse write: ", redact_secrets(error));
+                            }
                         }
                     }
                 }

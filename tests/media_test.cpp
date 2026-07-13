@@ -37,7 +37,12 @@ static void test_decoded_frame_quality() {
     assert(!detail::decoded_frame_usable(&frame));
 }
 
-static int count_decoded_frames(const std::filesystem::path& path) {
+struct DecodedVideoStats {
+    int frames = 0;
+    bool has_color = false;
+};
+
+static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) {
     CameraSourceConfig config;
     config.url = path.string();
     config.width = 160;
@@ -45,7 +50,7 @@ static int count_decoded_frames(const std::filesystem::path& path) {
     NetworkCameraSource source(config);
     std::string error;
     assert(source.open(&error));
-    int frames = 0;
+    DecodedVideoStats stats;
     for (;;) {
         auto result = source.read();
         if (result.status == CameraReadStatus::end_of_stream)
@@ -55,11 +60,14 @@ static int count_decoded_frames(const std::filesystem::path& path) {
         assert(result.status == CameraReadStatus::sample);
         assert(result.sample);
         if (result.sample->frame) {
-            ++frames;
+            ++stats.frames;
+            assert(result.sample->image);
+            stats.has_color =
+                stats.has_color || detail::decoded_image_has_color(*result.sample->image);
         }
     }
     source.close();
-    return frames;
+    return stats;
 }
 
 int main(int, char** argv) {
@@ -85,7 +93,7 @@ int main(int, char** argv) {
 
     PacketRing ring(std::chrono::seconds(10), 1000);
     EventMovieWriter movie;
-    std::vector<GrayFrame> frames;
+    std::vector<DecodedImage> images;
     bool movie_opened = false;
     bool overlay_tested = false;
     int samples = 0;
@@ -105,7 +113,7 @@ int main(int, char** argv) {
             const auto jpeg = source.render_jpeg(*sample.image);
             assert(jpeg.size() > 4);
             assert(jpeg[0] == 0xff && jpeg[1] == 0xd8);
-            frames.push_back(*sample.frame);
+            images.push_back(*sample.image);
             if (!overlay_tested && sample.image) {
                 const auto annotated =
                     source.render_jpeg(*sample.image, RedBox{20, 20, 100, 80, 4});
@@ -132,18 +140,20 @@ int main(int, char** argv) {
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 
-    const auto timelapse_frames = std::min<std::size_t>(frames.size(), 5);
+    const auto timelapse_frames = std::min<std::size_t>(images.size(), 5);
     for (const std::string extension : {".mkv", ".avi"}) {
         const auto timelapse_path = directory / ("media-timelapse" + extension);
         std::filesystem::remove(timelapse_path);
         TimelapseWriter timelapse;
         assert(timelapse.open(timelapse_path.string(), 160, 120, 1, &error));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {
-            assert(timelapse.write(frames[index], &error));
+            assert(timelapse.write(images[index], &error));
         }
         assert(timelapse.close(&error));
         assert(std::filesystem::file_size(timelapse_path) > 1000);
-        assert(count_decoded_frames(timelapse_path) == static_cast<int>(timelapse_frames));
+        const auto stats = decoded_video_stats(timelapse_path);
+        assert(stats.frames == static_cast<int>(timelapse_frames));
+        assert(stats.has_color);
     }
     source.close();
 
