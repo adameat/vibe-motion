@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -13,6 +14,18 @@
 
 using namespace vibe_motion;
 
+static void send_all(int fd, const std::string& data) {
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const auto count = ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        assert(count > 0);
+        offset += static_cast<std::size_t>(count);
+    }
+}
+
 static std::string get(std::uint16_t port, const std::string& path) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
@@ -23,13 +36,38 @@ static std::string get(std::uint16_t port, const std::string& path) {
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
     const std::string request =
         "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    assert(::send(fd, request.data(), request.size(), 0) == static_cast<ssize_t>(request.size()));
+    send_all(fd, request);
     std::string response;
     char buffer[1024];
     for (;;) {
         const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
         if (count <= 0)
             break;
+        response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    return response;
+}
+
+static std::string get_headers(std::uint16_t port, const std::string& path) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+    assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request =
+        "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    send_all(fd, request);
+    std::string response;
+    char buffer[1024];
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        assert(count > 0);
         response.append(buffer, static_cast<std::size_t>(count));
     }
     ::close(fd);
@@ -60,6 +98,12 @@ int main() {
     assert(image.find("Content-Type: image/jpeg") != std::string::npos);
     const auto body = image.substr(image.find("\r\n\r\n") + 4);
     assert(std::vector<std::uint8_t>(body.begin(), body.end()) == jpeg);
+    const auto short_stream = get_headers(server.port(), "/7/mjpg");
+    assert(short_stream.find("200 OK") != std::string::npos);
+    assert(short_stream.find("multipart/x-mixed-replace") != std::string::npos);
+    const auto long_stream = get_headers(server.port(), "/7/mjpg/stream");
+    assert(long_stream.find("200 OK") != std::string::npos);
+    assert(long_stream.find("multipart/x-mixed-replace") != std::string::npos);
     server.stop();
 
     std::cout << "http tests passed\n";
