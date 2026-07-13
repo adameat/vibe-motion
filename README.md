@@ -52,8 +52,8 @@ the configuration by replacing camera workers only after the new graph parses
 successfully. Network URLs are redacted from logs and config dumps.
 
 The web listener serves a small status page and JSON status plus Motion-style
-MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating Motion web
-control actions and database features are out of scope.
+MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
+Motion web control actions and database features are out of scope.
 
 ## Migration from an existing Motion deployment
 

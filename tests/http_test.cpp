@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -16,7 +17,10 @@ using namespace vibe_motion;
 static void send_all(int fd, const std::string& data) {
     std::size_t offset = 0;
     while (offset < data.size()) {
-        const auto count = ::send(fd, data.data() + offset, data.size() - offset, 0);
+        const auto count = ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
         assert(count > 0);
         offset += static_cast<std::size_t>(count);
     }
@@ -60,6 +64,9 @@ static std::string get_headers(std::uint16_t port, const std::string& path) {
     char buffer[1024];
     while (response.find("\r\n\r\n") == std::string::npos) {
         const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
         assert(count > 0);
         response.append(buffer, static_cast<std::size_t>(count));
     }
