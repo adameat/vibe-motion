@@ -47,6 +47,8 @@ using HookCompletion = std::function<void(const HookResult&)>;
 
 class HookExecutor {
   public:
+    // Construct while the process is single-threaded. The persistent hook
+    // supervisor is initialized directly in the forked child.
     explicit HookExecutor(HookExecutorOptions options = {});
     ~HookExecutor();
 

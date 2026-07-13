@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <poll.h>
 #include <stdexcept>
 #include <sys/prctl.h>
@@ -23,6 +24,29 @@ constexpr std::uint32_t response_finished = 2;
 // Keep each SOCK_SEQPACKET message comfortably below Linux's default Unix
 // socket send-buffer limit. Motion hook command lines are normally tiny.
 constexpr std::size_t maximum_request_size = 64 * 1024;
+
+void require_single_threaded_process() {
+    std::error_code error;
+    std::filesystem::directory_iterator task("/proc/self/task", error);
+    const std::filesystem::directory_iterator end;
+    if (error) {
+        throw std::runtime_error("cannot inspect process threads: " + error.message());
+    }
+
+    std::size_t task_count = 0;
+    while (task != end) {
+        if (++task_count > 1) {
+            throw std::logic_error("HookExecutor must be constructed before other threads start");
+        }
+        task.increment(error);
+        if (error) {
+            throw std::runtime_error("cannot inspect process threads: " + error.message());
+        }
+    }
+    if (task_count != 1) {
+        throw std::runtime_error("cannot determine process thread count");
+    }
+}
 
 struct RequestHeader {
     std::uint32_t type = 0;
@@ -280,6 +304,7 @@ HookExecutor::HookExecutor(HookExecutorOptions options) : options_(std::move(opt
         options_.child_comm.empty()) {
         throw std::invalid_argument("invalid hook executor options");
     }
+    require_single_threaded_process();
     int sockets[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) {
         throw std::runtime_error("cannot create hook supervisor socket");

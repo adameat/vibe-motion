@@ -1,10 +1,12 @@
 #include "vibe_motion/hooks.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -53,11 +55,32 @@ int main() {
 
     HookExecutor stopping_executor({1, 4, 5s, 100ms, "motion"});
     assert(stopping_executor.submit(std::vector<std::string>{"/bin/sleep", "5"}));
-    for (int attempt = 0; attempt < 100 && stopping_executor.running() == 0; ++attempt) {
+    const auto launch_deadline = std::chrono::steady_clock::now() + 5s;
+    while (stopping_executor.running() == 0 && std::chrono::steady_clock::now() < launch_deadline) {
         std::this_thread::sleep_for(1ms);
     }
     assert(stopping_executor.running() == 1);
     stopping_executor.stop();
+
+    std::atomic<bool> extra_thread_started = false;
+    std::jthread extra_thread([&](std::stop_token stop) {
+        extra_thread_started = true;
+        while (!stop.stop_requested()) {
+            std::this_thread::yield();
+        }
+    });
+    while (!extra_thread_started) {
+        std::this_thread::yield();
+    }
+    bool rejected_multithreaded_construction = false;
+    try {
+        HookExecutor invalid_executor({1, 4, 5s, 100ms, "motion"});
+    } catch (const std::logic_error&) {
+        rejected_multithreaded_construction = true;
+    }
+    extra_thread.request_stop();
+    extra_thread.join();
+    assert(rejected_multithreaded_construction);
 
     std::cout << "hook tests passed\n";
 }
