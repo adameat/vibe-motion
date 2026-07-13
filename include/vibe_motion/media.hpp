@@ -76,7 +76,6 @@ class DecodedImage {
     ~DecodedImage();
 
     bool valid() const noexcept;
-    bool has_color() const noexcept;
 
   private:
     struct Impl;
