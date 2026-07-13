@@ -87,6 +87,7 @@ class HookExecutor {
     void reap_and_expire();
     void finish(std::size_t index, int status, int exec_error);
     void fail_supervisor(int error);
+    void reap_supervisor_nonblocking() noexcept;
     void stop_supervisor() noexcept;
 
     HookExecutorOptions options_;

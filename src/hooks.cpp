@@ -440,6 +440,9 @@ void HookExecutor::finish(std::size_t index, int status, int exec_error) {
 }
 
 void HookExecutor::receive_supervisor_results() {
+    if (supervisor_socket_ < 0) {
+        return;
+    }
     for (;;) {
         SupervisorResponse response{};
         const auto received = ::recv(supervisor_socket_, &response, sizeof(response), MSG_DONTWAIT);
@@ -476,6 +479,11 @@ void HookExecutor::fail_supervisor(int error) {
         return;
     }
     supervisor_failed_ = true;
+    if (supervisor_socket_ >= 0) {
+        ::close(supervisor_socket_);
+        supervisor_socket_ = -1;
+    }
+    reap_supervisor_nonblocking();
     while (!children_.empty()) {
         if (children_.front().pid > 0) {
             (void)::kill(-children_.front().pid, SIGKILL);
@@ -486,6 +494,9 @@ void HookExecutor::fail_supervisor(int error) {
 
 void HookExecutor::reap_and_expire() {
     receive_supervisor_results();
+    if (supervisor_failed_) {
+        reap_supervisor_nonblocking();
+    }
     const auto now = std::chrono::steady_clock::now();
     for (std::size_t index = 0; index < children_.size();) {
         auto& child = children_[index];
@@ -500,6 +511,20 @@ void HookExecutor::reap_and_expire() {
             child.sent_kill = true;
         }
         ++index;
+    }
+}
+
+void HookExecutor::reap_supervisor_nonblocking() noexcept {
+    if (supervisor_pid_ <= 0) {
+        return;
+    }
+    int status = 0;
+    pid_t waited = -1;
+    do {
+        waited = ::waitpid(supervisor_pid_, &status, WNOHANG);
+    } while (waited < 0 && errno == EINTR);
+    if (waited == supervisor_pid_ || (waited < 0 && errno == ECHILD)) {
+        supervisor_pid_ = -1;
     }
 }
 

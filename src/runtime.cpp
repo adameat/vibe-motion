@@ -163,7 +163,11 @@ class CameraWorker {
     CameraWorker(CameraConfig config, std::filesystem::path target_dir, HookExecutor& hooks,
                  HttpServer* http)
         : config_(std::move(config)), target_dir_(std::move(target_dir)), hooks_(hooks),
-          http_(http) {}
+          http_(http) {
+        status_.effective_threshold = static_cast<std::uint64_t>(std::max(config_.threshold, 0));
+        status_.effective_noise_level =
+            static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
+    }
 
     ~CameraWorker() {
         stop();
