@@ -360,12 +360,6 @@ class CameraWorker {
     }
 
     void run_onvif_events() {
-        while (!stopping_.load() && !onvif_media_ready_.load()) {
-            std::this_thread::sleep_for(100ms);
-        }
-        if (stopping_.load()) {
-            return;
-        }
         OnvifClient client(onvif_config());
         client.receive_motion_events(
             stopping_,
@@ -555,6 +549,23 @@ class CameraWorker {
         MotionDetector detector(detection_settings);
         int loaded_mask_width = 0;
         int loaded_mask_height = 0;
+        const auto load_mask = [&](int width, int height) {
+            if (width <= 0 || height <= 0 ||
+                (width == loaded_mask_width && height == loaded_mask_height)) {
+                return true;
+            }
+            try {
+                detector.load_pgm_mask(config_.mask_file, width, height);
+                loaded_mask_width = width;
+                loaded_mask_height = height;
+                return true;
+            } catch (const std::exception& error) {
+                Logger::instance().write(LogLevel::error, "camera ", config_.camera_id, ": ",
+                                         error.what());
+                set_status([&](WorkerStatus& state) { state.error = error.what(); });
+                return false;
+            }
+        };
 
         EventStateMachine events({config_.minimum_motion_frames,
                                   std::chrono::seconds(config_.event_gap), config_.post_capture});
@@ -612,7 +623,6 @@ class CameraWorker {
                                                  stream.profile_token, ", ", stream.width, "x",
                                                  stream.height, ") resolved media stream");
                     }
-                    onvif_media_ready_.store(true);
                 } catch (const std::exception& error) {
                     const std::string safe_error = redact_secrets(error.what());
                     set_status([&](WorkerStatus& state) {
@@ -680,18 +690,13 @@ class CameraWorker {
                     analysis_width > 0 ? analysis_width : source.stream_info().width();
                 const int mask_height =
                     analysis_height > 0 ? analysis_height : source.stream_info().height();
-                if (mask_width != loaded_mask_width || mask_height != loaded_mask_height) {
-                    try {
-                        detector.load_pgm_mask(config_.mask_file, mask_width, mask_height);
-                        loaded_mask_width = mask_width;
-                        loaded_mask_height = mask_height;
-                    } catch (const std::exception& error) {
-                        Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
-                                                 ": ", error.what());
-                        set_status([&](WorkerStatus& state) { state.error = error.what(); });
-                        source.close();
-                        return;
-                    }
+                if (mask_width <= 0 || mask_height <= 0) {
+                    Logger::instance().write(
+                        LogLevel::info, "camera ", config_.camera_id,
+                        ": deferring mask load until the first decoded frame provides dimensions");
+                } else if (!load_mask(mask_width, mask_height)) {
+                    source.close();
+                    return;
                 }
             }
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id, " connected (",
@@ -729,6 +734,10 @@ class CameraWorker {
                 auto& frame = *sample.frame;
                 DetectionResult detection;
                 if (config_.motion_detection) {
+                    if (!config_.mask_file.empty() && !load_mask(frame.width, frame.height)) {
+                        source.close();
+                        return;
+                    }
                     detection = detector.process(frame);
                 } else {
                     detection.effective_threshold =
@@ -950,7 +959,6 @@ class CameraWorker {
     std::thread thread_;
     std::thread onvif_thread_;
     std::atomic<bool> onvif_motion_{false};
-    std::atomic<bool> onvif_media_ready_{false};
     std::atomic<std::uint64_t> onvif_trigger_generation_{0};
     std::mutex onvif_state_mutex_;
     std::unordered_map<std::string, bool> onvif_states_;

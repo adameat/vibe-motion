@@ -66,7 +66,10 @@ omitted for ONVIF cameras and then come from that profile. Explicit dimensions r
 analysis-scaling override. A camera file can use `width auto` and `height auto` to undo
 dimensions inherited from the main file.
 
-ONVIF events are independent from stream discovery:
+ONVIF event polling runs independently from successful stream discovery, so it can connect while
+media discovery is retrying. Both features use `onvif_url`; configuring it still makes the ONVIF
+`GetStreamUri` result the camera's media source, so event-only ONVIF alongside a separate
+`netcam_url` is not supported:
 
 ```conf
 onvif_url http://192.0.2.20/onvif/device_service
