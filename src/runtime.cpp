@@ -6,11 +6,14 @@
 #include "vibe_motion/http.hpp"
 #include "vibe_motion/log.hpp"
 #include "vibe_motion/media.hpp"
+#include "vibe_motion/onvif.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -72,6 +75,77 @@ std::string json_escape(const std::string& value) {
         }
     }
     return output.str();
+}
+
+void append_json_map(std::ostringstream& output, const std::map<std::string, std::string>& values) {
+    output << '{';
+    bool first = true;
+    for (const auto& [key, value] : values) {
+        if (!first) {
+            output << ',';
+        }
+        first = false;
+        output << '"' << json_escape(key) << "\":\"" << json_escape(value) << '"';
+    }
+    output << '}';
+}
+
+std::string onvif_event_json(const OnvifEvent& event) {
+    std::ostringstream output;
+    output << "{\"topic\":\"" << json_escape(event.topic)
+           << "\",\"motion_topic\":" << (event.motion_topic ? "true" : "false")
+           << ",\"has_state\":" << (event.has_state ? "true" : "false")
+           << ",\"active\":" << (event.active ? "true" : "false") << ",\"utc_time\":\""
+           << json_escape(event.utc_time) << "\",\"property_operation\":\""
+           << json_escape(event.property_operation) << "\",\"source\":";
+    append_json_map(output, event.source);
+    output << ",\"key_items\":";
+    append_json_map(output, event.key_items);
+    output << ",\"data\":";
+    append_json_map(output, event.data);
+    output << ",\"raw_xml\":\"" << json_escape(event.raw_xml) << "\"}";
+    return output.str();
+}
+
+std::optional<std::chrono::system_clock::time_point>
+parse_onvif_utc_time(const std::string& value) {
+    if (value.size() < 20 || value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
+        value[13] != ':' || value[16] != ':') {
+        return std::nullopt;
+    }
+    std::tm parsed{};
+    std::istringstream input(value.substr(0, 19));
+    input >> std::get_time(&parsed, "%Y-%m-%dT%H:%M:%S");
+    if (input.fail() || (value[19] != 'Z' && value[19] != '.')) {
+        return std::nullopt;
+    }
+    auto result = std::chrono::system_clock::from_time_t(::timegm(&parsed));
+    if (value[19] == 'Z') {
+        return value.size() == 20 ? std::optional<std::chrono::system_clock::time_point>(result)
+                                  : std::nullopt;
+    }
+
+    const auto suffix = value.find('Z', 20);
+    if (suffix == std::string::npos || suffix == 20 || suffix + 1 != value.size()) {
+        return std::nullopt;
+    }
+    std::string fractional_digits = value.substr(20, suffix - 20);
+    if (!std::all_of(fractional_digits.begin(), fractional_digits.end(), [](char digit) {
+            return std::isdigit(static_cast<unsigned char>(digit)) != 0;
+        })) {
+        return std::nullopt;
+    }
+    fractional_digits.resize(9, '0');
+    std::int64_t nanoseconds = 0;
+    for (const char digit : fractional_digits.substr(0, 9)) {
+        if (!std::isdigit(static_cast<unsigned char>(digit))) {
+            return std::nullopt;
+        }
+        nanoseconds = nanoseconds * 10 + (digit - '0');
+    }
+    result += std::chrono::duration_cast<std::chrono::system_clock::duration>(
+        std::chrono::nanoseconds(nanoseconds));
+    return result;
 }
 
 std::filesystem::path ensure_extension(std::filesystem::path path, const std::string& extension) {
@@ -155,8 +229,73 @@ struct WorkerStatus {
     std::uint64_t effective_threshold = 0;
     std::uint8_t effective_noise_level = 0;
     std::uint64_t event_number = 0;
+    bool onvif_events_connected = false;
+    bool onvif_motion = false;
+    std::uint64_t onvif_event_count = 0;
+    std::string onvif_topic;
+    std::string onvif_event_key;
+    std::string onvif_event_utc;
+    std::string onvif_event_operation;
+    bool onvif_event_motion_topic = false;
+    bool onvif_event_has_state = false;
+    bool onvif_event_active = false;
+    std::map<std::string, std::string> onvif_event_source;
+    std::map<std::string, std::string> onvif_event_key_items;
+    std::map<std::string, std::string> onvif_event_data;
+    std::string onvif_profile;
+    std::string onvif_profile_name;
+    int onvif_profile_width = 0;
+    int onvif_profile_height = 0;
+    std::string onvif_error;
     std::string error;
 };
+
+bool url_unreserved(unsigned char character) {
+    return std::isalnum(character) != 0 || character == '-' || character == '.' ||
+           character == '_' || character == '~';
+}
+
+std::string url_encode(const std::string& value) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    std::string result;
+    for (const char raw_character : value) {
+        const auto character = static_cast<unsigned char>(raw_character);
+        if (url_unreserved(character)) {
+            result.push_back(static_cast<char>(character));
+        } else {
+            result.push_back('%');
+            result.push_back(digits[character >> 4U]);
+            result.push_back(digits[character & 0x0FU]);
+        }
+    }
+    return result;
+}
+
+std::string url_with_userpass(std::string url, const std::string& userpass) {
+    if (userpass.empty()) {
+        return url;
+    }
+    const auto scheme = url.find("://");
+    if (scheme == std::string::npos) {
+        return url;
+    }
+    const auto authority = scheme + 3;
+    const auto authority_end = url.find_first_of("/?#", authority);
+    const auto at = url.find('@', authority);
+    if (at != std::string::npos && (authority_end == std::string::npos || at < authority_end)) {
+        return url;
+    }
+    const auto colon = userpass.find(':');
+    const std::string username = userpass.substr(0, colon);
+    const std::string password =
+        colon == std::string::npos ? std::string{} : userpass.substr(colon + 1);
+    std::string credentials = url_encode(username);
+    if (colon != std::string::npos) {
+        credentials += ':' + url_encode(password);
+    }
+    url.insert(authority, credentials + '@');
+    return url;
+}
 
 class CameraWorker {
   public:
@@ -175,6 +314,9 @@ class CameraWorker {
 
     void start() {
         stopping_.store(false);
+        if (config_.onvif_events) {
+            onvif_thread_ = std::thread([this] { run_onvif_events(); });
+        }
         thread_ = std::thread([this] { run(); });
     }
 
@@ -191,6 +333,9 @@ class CameraWorker {
         if (thread_.joinable()) {
             thread_.join();
         }
+        if (onvif_thread_.joinable()) {
+            onvif_thread_.join();
+        }
     }
 
     WorkerStatus status() const {
@@ -203,6 +348,89 @@ class CameraWorker {
     }
 
   private:
+    OnvifClientConfig onvif_config() const {
+        OnvifClientConfig result;
+        result.device_url = config_.onvif_url;
+        result.userpass = config_.onvif_userpass;
+        result.profile = config_.onvif_profile;
+        result.auth = config_.onvif_auth;
+        result.motion_topics = parse_onvif_topic_list(config_.onvif_motion_topics);
+        result.tls_verify = config_.onvif_tls_verify;
+        return result;
+    }
+
+    void run_onvif_events() {
+        while (!stopping_.load() && !onvif_media_ready_.load()) {
+            std::this_thread::sleep_for(100ms);
+        }
+        if (stopping_.load()) {
+            return;
+        }
+        OnvifClient client(onvif_config());
+        client.receive_motion_events(
+            stopping_,
+            [this](const OnvifEvent& event) {
+                set_status([&](WorkerStatus& state) {
+                    ++state.onvif_event_count;
+                    state.onvif_topic = event.topic;
+                    state.onvif_event_key = event.key;
+                    state.onvif_event_utc = event.utc_time;
+                    state.onvif_event_operation = event.property_operation;
+                    state.onvif_event_motion_topic = event.motion_topic;
+                    state.onvif_event_has_state = event.has_state;
+                    state.onvif_event_active = event.active;
+                    state.onvif_event_source = event.source;
+                    state.onvif_event_key_items = event.key_items;
+                    state.onvif_event_data = event.data;
+                });
+                if (config_.onvif_log_events) {
+                    Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                             ": ONVIF notification ",
+                                             redact_secrets(onvif_event_json(event)));
+                }
+                if (!event.motion_topic || !event.has_state) {
+                    return;
+                }
+                bool active = false;
+                {
+                    std::lock_guard<std::mutex> lock(onvif_state_mutex_);
+                    onvif_states_[event.key] = event.active;
+                    if (event.active) {
+                        if (const auto event_time = parse_onvif_utc_time(event.utc_time);
+                            event_time && (!onvif_pending_trigger_time_ ||
+                                           *event_time < *onvif_pending_trigger_time_)) {
+                            onvif_pending_trigger_time_ = *event_time;
+                        }
+                        // Publish the generation only after its timestamp is visible.
+                        onvif_trigger_generation_.fetch_add(1);
+                    }
+                    active = std::any_of(onvif_states_.begin(), onvif_states_.end(),
+                                         [](const auto& item) { return item.second; });
+                }
+                onvif_motion_.store(active);
+                set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+            },
+            [this](bool connected, const std::string& error) {
+                if (!connected) {
+                    {
+                        std::lock_guard<std::mutex> lock(onvif_state_mutex_);
+                        onvif_states_.clear();
+                        onvif_pending_trigger_time_.reset();
+                    }
+                    onvif_motion_.store(false);
+                }
+                set_status([&](WorkerStatus& state) {
+                    state.onvif_events_connected = connected;
+                    state.onvif_motion = connected && onvif_motion_.load();
+                    state.onvif_error = redact_secrets(error);
+                });
+                if (!error.empty()) {
+                    Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
+                                             ": ONVIF events: ", redact_secrets(error));
+                }
+            });
+    }
+
     ExpansionContext context(const DetectionResult& detection, const GrayFrame& frame,
                              std::uint64_t event, std::string filename = {},
                              std::string type = {}) const {
@@ -325,16 +553,8 @@ class CameraWorker {
         detection_settings.lightswitch_percent = config_.lightswitch_percent;
         detection_settings.despeckle = !config_.despeckle_filter.empty();
         MotionDetector detector(detection_settings);
-        if (!config_.mask_file.empty()) {
-            try {
-                detector.load_pgm_mask(config_.mask_file, config_.width, config_.height);
-            } catch (const std::exception& error) {
-                Logger::instance().write(LogLevel::error, "camera ", config_.camera_id, ": ",
-                                         error.what());
-                set_status([&](WorkerStatus& state) { state.error = error.what(); });
-                return;
-            }
-        }
+        int loaded_mask_width = 0;
+        int loaded_mask_height = 0;
 
         EventStateMachine events({config_.minimum_motion_frames,
                                   std::chrono::seconds(config_.event_gap), config_.post_capture});
@@ -355,12 +575,66 @@ class CameraWorker {
         std::int64_t timelapse_bucket = -1;
         std::chrono::steady_clock::time_point last_http_publish{};
         bool record_live = false;
+        std::uint64_t seen_onvif_trigger = 0;
+        int onvif_trigger_frames = 0;
+        std::optional<std::chrono::system_clock::time_point> pending_onvif_event_time;
+        std::optional<OnvifStream> onvif_stream;
 
         while (!stopping_.load()) {
+            std::string media_url = config_.netcam_url;
+            int analysis_width = config_.width;
+            int analysis_height = config_.height;
+            if (!config_.onvif_url.empty()) {
+                try {
+                    bool newly_resolved = false;
+                    if (!onvif_stream) {
+                        onvif_stream = OnvifClient(onvif_config()).resolve_stream();
+                        newly_resolved = true;
+                    }
+                    const OnvifStream& stream = *onvif_stream;
+                    media_url = stream.uri;
+                    if (!config_.width_configured) {
+                        analysis_width = stream.width;
+                    }
+                    if (!config_.height_configured) {
+                        analysis_height = stream.height;
+                    }
+                    set_status([&](WorkerStatus& state) {
+                        state.onvif_profile = stream.profile_token;
+                        state.onvif_profile_name = stream.profile_name;
+                        state.onvif_profile_width = stream.width;
+                        state.onvif_profile_height = stream.height;
+                        state.onvif_error.clear();
+                    });
+                    if (newly_resolved) {
+                        Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                                 ": ONVIF profile ", stream.profile_name, " (",
+                                                 stream.profile_token, ", ", stream.width, "x",
+                                                 stream.height, ") resolved media stream");
+                    }
+                    onvif_media_ready_.store(true);
+                } catch (const std::exception& error) {
+                    const std::string safe_error = redact_secrets(error.what());
+                    set_status([&](WorkerStatus& state) {
+                        state.connected = false;
+                        ++state.reconnects;
+                        state.error = safe_error;
+                        state.onvif_error = safe_error;
+                    });
+                    Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
+                                             ": ONVIF media discovery: ", safe_error);
+                    for (int tenth = 0; tenth < 10 && !stopping_.load(); ++tenth) {
+                        std::this_thread::sleep_for(100ms);
+                    }
+                    continue;
+                }
+            }
             CameraSourceConfig source_config;
-            source_config.url = config_.netcam_url;
-            source_config.width = config_.width;
-            source_config.height = config_.height;
+            const std::string media_userpass =
+                !config_.netcam_userpass.empty() ? config_.netcam_userpass : config_.onvif_userpass;
+            source_config.url = url_with_userpass(std::move(media_url), media_userpass);
+            source_config.width = analysis_width;
+            source_config.height = analysis_height;
             source_config.analysis_framerate = config_.framerate;
             source_config.jpeg_quality = config_.movie_quality;
             const auto net_options = parse_netcam_options(config_.netcam_params);
@@ -401,6 +675,25 @@ class CameraWorker {
                 state.connected = true;
                 state.error.clear();
             });
+            if (config_.motion_detection && !config_.mask_file.empty()) {
+                const int mask_width =
+                    analysis_width > 0 ? analysis_width : source.stream_info().width();
+                const int mask_height =
+                    analysis_height > 0 ? analysis_height : source.stream_info().height();
+                if (mask_width != loaded_mask_width || mask_height != loaded_mask_height) {
+                    try {
+                        detector.load_pgm_mask(config_.mask_file, mask_width, mask_height);
+                        loaded_mask_width = mask_width;
+                        loaded_mask_height = mask_height;
+                    } catch (const std::exception& error) {
+                        Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
+                                                 ": ", error.what());
+                        set_status([&](WorkerStatus& state) { state.error = error.what(); });
+                        source.close();
+                        return;
+                    }
+                }
+            }
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id, " connected (",
                                      source.stream_info().codec_name(), ")");
             const auto warm_until = std::chrono::steady_clock::now() + 2s;
@@ -434,10 +727,42 @@ class CameraWorker {
                     continue;
                 }
                 auto& frame = *sample.frame;
-                const auto detection = detector.process(frame);
+                DetectionResult detection;
+                if (config_.motion_detection) {
+                    detection = detector.process(frame);
+                } else {
+                    detection.effective_threshold =
+                        static_cast<std::uint64_t>(std::max(config_.threshold, 0));
+                    detection.effective_noise_level =
+                        static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
+                }
                 const bool warmed = std::chrono::steady_clock::now() >= warm_until;
+                const std::uint64_t onvif_generation = onvif_trigger_generation_.load();
+                bool onvif_edge = false;
+                if (onvif_generation != seen_onvif_trigger) {
+                    seen_onvif_trigger = onvif_generation;
+                    onvif_trigger_frames = 1;
+                    onvif_edge = true;
+                    std::optional<std::chrono::system_clock::time_point> trigger_time;
+                    {
+                        std::lock_guard<std::mutex> lock(onvif_state_mutex_);
+                        trigger_time = onvif_pending_trigger_time_;
+                        onvif_pending_trigger_time_.reset();
+                    }
+                    if (!events.active()) {
+                        pending_onvif_event_time = trigger_time;
+                    }
+                }
+                const bool onvif_triggered = onvif_motion_.load() || onvif_trigger_frames > 0;
+                const bool qualifying_motion =
+                    (config_.motion_detection && warmed && detection.motion) ||
+                    (config_.onvif_events && onvif_triggered);
                 const auto decision =
-                    events.update(warmed && detection.motion, std::chrono::steady_clock::now());
+                    events.update(qualifying_motion, std::chrono::steady_clock::now(),
+                                  config_.onvif_events && onvif_edge);
+                if (onvif_trigger_frames > 0) {
+                    --onvif_trigger_frames;
+                }
                 const bool record_frame =
                     decision.record_frame || (config_.movie_all_frames && events.active());
                 if (movie.is_open() && !decision.event_started && record_frame) {
@@ -473,12 +798,14 @@ class CameraWorker {
                 // This ordering lets a snapshot on the trigger frame attach to
                 // the event that has just been announced to the hook scripts.
                 if (decision.event_started) {
+                    const auto event_when = pending_onvif_event_time.value_or(frame.captured_at);
+                    pending_onvif_event_time.reset();
                     auto values = context(detection, frame, decision.event_number);
-                    hook(config_.on_event_start, values, frame.captured_at);
+                    hook(config_.on_event_start, values, event_when);
                     if (config_.movie_output) {
                         movie_path = output_path(config_.movie_filename,
                                                  config_.movie_container == "mp4" ? ".mp4" : ".mkv",
-                                                 values, frame.captured_at);
+                                                 values, event_when);
                         std::filesystem::create_directories(movie_path.parent_path());
                         std::string error;
                         if (movie.open(movie_path.string(), source.stream_info(), &error)) {
@@ -489,10 +816,12 @@ class CameraWorker {
                                     LogLevel::warning, "camera ", config_.camera_id,
                                     ": movie preroll: ", redact_secrets(error));
                             }
-                            hook(config_.on_movie_start, values, frame.captured_at);
+                            hook(config_.on_movie_start, values, event_when);
                         } else {
                             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                      ": movie open: ", redact_secrets(error));
+                            std::error_code ignored;
+                            std::filesystem::remove(movie_path, ignored);
                             movie_path.clear();
                         }
                     }
@@ -619,6 +948,13 @@ class CameraWorker {
     HttpServer* http_ = nullptr;
     std::atomic<bool> stopping_{false};
     std::thread thread_;
+    std::thread onvif_thread_;
+    std::atomic<bool> onvif_motion_{false};
+    std::atomic<bool> onvif_media_ready_{false};
+    std::atomic<std::uint64_t> onvif_trigger_generation_{0};
+    std::mutex onvif_state_mutex_;
+    std::unordered_map<std::string, bool> onvif_states_;
+    std::optional<std::chrono::system_clock::time_point> onvif_pending_trigger_time_;
     mutable std::mutex status_mutex_;
     WorkerStatus status_;
 };
@@ -681,7 +1017,30 @@ class Application::Impl {
                    << ",\"threshold\":" << state.effective_threshold
                    << ",\"noise_level\":" << static_cast<unsigned>(state.effective_noise_level)
                    << ",\"reconnects\":" << state.reconnects << ",\"error\":\""
-                   << json_escape(redact_secrets(state.error)) << "\"}";
+                   << json_escape(redact_secrets(state.error)) << "\""
+                   << ",\"onvif_profile\":\"" << json_escape(state.onvif_profile) << "\""
+                   << ",\"onvif_profile_name\":\"" << json_escape(state.onvif_profile_name)
+                   << "\",\"onvif_profile_width\":" << state.onvif_profile_width
+                   << ",\"onvif_profile_height\":" << state.onvif_profile_height
+                   << ",\"onvif_events_connected\":"
+                   << (state.onvif_events_connected ? "true" : "false")
+                   << ",\"onvif_motion\":" << (state.onvif_motion ? "true" : "false")
+                   << ",\"onvif_event_count\":" << state.onvif_event_count << ",\"onvif_topic\":\""
+                   << json_escape(state.onvif_topic) << "\""
+                   << ",\"onvif_last_event\":{\"key\":\"" << json_escape(state.onvif_event_key)
+                   << "\",\"utc_time\":\"" << json_escape(state.onvif_event_utc)
+                   << "\",\"property_operation\":\"" << json_escape(state.onvif_event_operation)
+                   << "\",\"motion_topic\":" << (state.onvif_event_motion_topic ? "true" : "false")
+                   << ",\"has_state\":" << (state.onvif_event_has_state ? "true" : "false")
+                   << ",\"active\":" << (state.onvif_event_active ? "true" : "false")
+                   << ",\"source\":";
+            append_json_map(output, state.onvif_event_source);
+            output << ",\"key_items\":";
+            append_json_map(output, state.onvif_event_key_items);
+            output << ",\"data\":";
+            append_json_map(output, state.onvif_event_data);
+            output << '}' << ",\"onvif_error\":\"" << json_escape(redact_secrets(state.onvif_error))
+                   << "\"}";
         }
         output << "]}";
         return output.str();

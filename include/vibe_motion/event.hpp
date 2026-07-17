@@ -25,7 +25,8 @@ struct EventDecision {
 class EventStateMachine {
   public:
     explicit EventStateMachine(EventSettings settings);
-    EventDecision update(bool qualifying_motion, std::chrono::steady_clock::time_point now);
+    EventDecision update(bool qualifying_motion, std::chrono::steady_clock::time_point now,
+                         bool force_confirm = false);
     EventDecision stop();
     bool active() const noexcept {
         return active_;

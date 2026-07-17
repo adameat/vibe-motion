@@ -20,8 +20,23 @@ struct CameraConfig {
     std::string netcam_params;
     bool netcam_use_tcp = false;
 
+    // When set, the actual media URI is resolved through ONVIF GetProfiles /
+    // GetStreamUri instead of being read from netcam_url.
+    std::string onvif_url;
+    std::string onvif_userpass;
+    std::string onvif_profile; // Exact profile Name or token; empty selects largest resolution.
+    std::string onvif_auth = "auto";
+    bool onvif_events = false;
+    bool onvif_log_events = false;
+    bool onvif_tls_verify = true;
+    std::string onvif_motion_topics =
+        "Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect";
+    bool motion_detection = true;
+
     int width = 640;
     int height = 480;
+    bool width_configured = false;
+    bool height_configured = false;
     int framerate = 15;
     int text_scale = 1;
     bool text_changes = false;
