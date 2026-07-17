@@ -597,11 +597,11 @@ class CameraWorker {
             int analysis_height = config_.height;
             if (!config_.onvif_url.empty()) {
                 try {
-                    bool newly_resolved = false;
-                    if (!onvif_stream) {
-                        onvif_stream = OnvifClient(onvif_config()).resolve_stream();
-                        newly_resolved = true;
-                    }
+                    OnvifStream resolved = OnvifClient(onvif_config()).resolve_stream();
+                    const bool newly_resolved =
+                        !onvif_stream || onvif_stream->uri != resolved.uri ||
+                        onvif_stream->profile_token != resolved.profile_token;
+                    onvif_stream = std::move(resolved);
                     const OnvifStream& stream = *onvif_stream;
                     media_url = stream.uri;
                     if (!config_.width_configured) {
