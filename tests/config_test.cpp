@@ -101,6 +101,9 @@ int main() {
     assert(onvif.cameras.front().onvif_auth == "auto");
     assert(!onvif.cameras.front().width_configured);
     assert(!onvif.cameras.front().height_configured);
+    const CameraConfig defaults;
+    assert(onvif.cameras.front().width == defaults.width);
+    assert(onvif.cameras.front().height == defaults.height);
     const std::string onvif_dump = onvif.dump_effective();
     assert(onvif_dump.find("admin:secret") == std::string::npos);
     assert(onvif_dump.find("onvif_userpass REDACTED") != std::string::npos);
@@ -158,6 +161,17 @@ int main() {
         camera.camera_name = "bad";
         camera.onvif_events = true;
         camera.movie_passthrough = true;
+        invalid.cameras.push_back(std::move(camera));
+        invalid.validate();
+    });
+    expect_config_error([] {
+        Config invalid;
+        CameraConfig camera;
+        camera.camera_id = 1;
+        camera.camera_name = "ambiguous";
+        camera.netcam_url = "rtsp://camera.example/stream";
+        camera.onvif_url = "http://camera.example/onvif/device_service";
+        camera.movie_output = false;
         invalid.cameras.push_back(std::move(camera));
         invalid.validate();
     });

@@ -173,7 +173,7 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.motion_detection = boolean(value, location, key);
     else if (key == "width") {
         if (lower(trim(value)) == "auto") {
-            c.width = 640;
+            c.width = CameraConfig{}.width;
             c.width_configured = false;
         } else {
             c.width = integer(value, location, key);
@@ -181,7 +181,7 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         }
     } else if (key == "height") {
         if (lower(trim(value)) == "auto") {
-            c.height = 480;
+            c.height = CameraConfig{}.height;
             c.height_configured = false;
         } else {
             c.height = integer(value, location, key);
@@ -596,6 +596,8 @@ void Config::validate() const {
             onvif_url.rfind("http://", 0) == 0 || onvif_url.rfind("https://", 0) == 0;
         check_range(valid_media_url || valid_onvif_url, c,
                     "netcam_url or an HTTP(S) onvif_url is required");
+        check_range(url.empty() || onvif_url.empty(), c,
+                    "netcam_url and onvif_url cannot be set together");
         check_range(onvif_url.empty() || valid_onvif_url, c, "onvif_url must use http or https");
         check_range(!c.onvif_events || valid_onvif_url, c, "onvif_events requires onvif_url");
         check_range(!c.onvif_log_events || c.onvif_events, c,
