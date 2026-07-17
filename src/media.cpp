@@ -538,6 +538,9 @@ bool NetworkCameraSource::open(std::string* error) {
     }
     result = avcodec_parameters_to_context(impl_->decoder.get(), input_stream->codecpar);
     if (result >= 0) {
+        impl_->decoder->skip_frame = impl_->config.decode_mode == FrameDecodeMode::keyframes
+                                         ? AVDISCARD_NONKEY
+                                         : AVDISCARD_DEFAULT;
         result = avcodec_open2(impl_->decoder.get(), codec, nullptr);
     }
     if (result < 0) {
@@ -575,6 +578,16 @@ bool NetworkCameraSource::is_open() const noexcept {
 const StreamInfo& NetworkCameraSource::stream_info() const noexcept {
     return impl_->stream;
 }
+FrameDecodeMode NetworkCameraSource::decode_mode() const noexcept {
+    return impl_->config.decode_mode;
+}
+void NetworkCameraSource::set_decode_mode(FrameDecodeMode mode) noexcept {
+    impl_->config.decode_mode = mode;
+    if (impl_->decoder) {
+        impl_->decoder->skip_frame =
+            mode == FrameDecodeMode::keyframes ? AVDISCARD_NONKEY : AVDISCARD_DEFAULT;
+    }
+}
 
 CameraReadResult NetworkCameraSource::read() {
     if (!is_open()) {
@@ -584,6 +597,7 @@ CameraReadResult NetworkCameraSource::read() {
         if (!detail::decoded_frame_usable(impl_->decoded.get())) {
             return {CameraReadStatus::sample, std::move(sample), {}};
         }
+        sample.decoded_keyframe = (impl_->decoded->flags & AV_FRAME_FLAG_KEY) != 0;
         // Some RTSP cameras omit dimensions from the initial codec parameters
         // and reveal them only after the first frame is decoded. StreamInfo is
         // shared with retained packets and movie writers, so keep it current.

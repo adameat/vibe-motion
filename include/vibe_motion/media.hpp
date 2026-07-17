@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vibe_motion/decode.hpp"
 #include "vibe_motion/frame.hpp"
 
 #include <chrono>
@@ -102,6 +103,7 @@ struct CameraSourceConfig {
     std::chrono::milliseconds reconnect_delay{1000};
     std::string rtsp_transport = "tcp";
     int jpeg_quality = 80; // 1..100; <= 0 disables JPEG generation
+    FrameDecodeMode decode_mode = FrameDecodeMode::all;
     std::map<std::string, std::string> options;
 };
 
@@ -112,6 +114,7 @@ struct CameraSample {
     // Keeping the storage in the source avoids allocating a multi-megabyte buffer per frame.
     const GrayFrame* frame = nullptr;  // null when this packet produced no frame
     std::optional<DecodedImage> image; // color source for post-detection overlays
+    bool decoded_keyframe = false;
 };
 
 enum class CameraReadStatus { sample, again, timeout, end_of_stream, error };
@@ -136,6 +139,8 @@ class NetworkCameraSource {
     bool is_open() const noexcept;
     CameraReadResult read();
     const StreamInfo& stream_info() const noexcept;
+    FrameDecodeMode decode_mode() const noexcept;
+    void set_decode_mode(FrameDecodeMode mode) noexcept;
     std::vector<std::uint8_t> render_jpeg(const DecodedImage& image,
                                           std::optional<RedBox> redbox = std::nullopt);
 

@@ -229,6 +229,10 @@ struct WorkerStatus {
     std::uint64_t effective_threshold = 0;
     std::uint8_t effective_noise_level = 0;
     std::uint64_t event_number = 0;
+    std::string decode_frames = "all";
+    std::string decode_requested = "all";
+    std::string decode_active = "all";
+    std::int64_t keyframe_interval_ms = 0;
     bool onvif_events_connected = false;
     bool onvif_motion = false;
     std::uint64_t onvif_event_count = 0;
@@ -250,6 +254,14 @@ struct WorkerStatus {
     std::string onvif_events_error;
     std::string error;
 };
+
+FrameDecodeMode idle_decode_mode(const CameraConfig& config) {
+    if (config.decode_frames == "keyframes" ||
+        (config.decode_frames == "auto" && config.onvif_events && !config.motion_detection)) {
+        return FrameDecodeMode::keyframes;
+    }
+    return FrameDecodeMode::all;
+}
 
 bool url_unreserved(unsigned char character) {
     return std::isalnum(character) != 0 || character == '-' || character == '.' ||
@@ -307,6 +319,10 @@ class CameraWorker {
         status_.effective_threshold = static_cast<std::uint64_t>(std::max(config_.threshold, 0));
         status_.effective_noise_level =
             static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
+        status_.decode_frames = config_.decode_frames;
+        const auto idle_mode = idle_decode_mode(config_);
+        status_.decode_requested = std::string(frame_decode_mode_name(idle_mode));
+        status_.decode_active = status_.decode_requested;
     }
 
     ~CameraWorker() {
@@ -595,6 +611,10 @@ class CameraWorker {
         if (!config_.onvif_url.empty()) {
             onvif_client.emplace(onvif_config());
         }
+        const auto configured_idle_decode_mode = idle_decode_mode(config_);
+        const bool dynamic_full_decode = config_.decode_frames == "auto" &&
+                                         configured_idle_decode_mode == FrameDecodeMode::keyframes;
+        const std::string camera_key = std::to_string(config_.camera_id);
 
         while (!stopping_.load()) {
             std::string media_url = config_.netcam_url;
@@ -652,6 +672,7 @@ class CameraWorker {
             source_config.height = analysis_height;
             source_config.analysis_framerate = config_.framerate;
             source_config.jpeg_quality = config_.movie_quality;
+            source_config.decode_mode = configured_idle_decode_mode;
             const auto net_options = parse_netcam_options(config_.netcam_params);
             if (const auto found = net_options.find("interrupt"); found != net_options.end()) {
                 try {
@@ -686,9 +707,18 @@ class CameraWorker {
                 }
                 continue;
             }
-            set_status([](WorkerStatus& state) {
+            FrameDecodeController decode_controller(configured_idle_decode_mode);
+            auto reported_requested_mode = decode_controller.requested_mode();
+            auto reported_active_mode = decode_controller.active_mode();
+            std::optional<std::chrono::steady_clock::time_point> last_keyframe_at;
+            set_status([&](WorkerStatus& state) {
                 state.connected = true;
                 state.error.clear();
+                state.decode_requested =
+                    std::string(frame_decode_mode_name(decode_controller.requested_mode()));
+                state.decode_active =
+                    std::string(frame_decode_mode_name(decode_controller.active_mode()));
+                state.keyframe_interval_ms = 0;
             });
             if (config_.motion_detection && !config_.mask_file.empty()) {
                 const int mask_width =
@@ -707,8 +737,29 @@ class CameraWorker {
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id, " connected (",
                                      source.stream_info().codec_name(), ")");
             const auto warm_until = std::chrono::steady_clock::now() + 2s;
+            const auto update_decode_mode = [&](bool decoded_keyframe) {
+                const auto now = std::chrono::steady_clock::now();
+                const bool wants_full_decode =
+                    dynamic_full_decode && http_ != nullptr && http_->wants_jpeg(camera_key);
+                if (const auto transition =
+                        decode_controller.update(wants_full_decode, decoded_keyframe, now)) {
+                    source.set_decode_mode(*transition);
+                }
+                if (decode_controller.requested_mode() != reported_requested_mode ||
+                    decode_controller.active_mode() != reported_active_mode) {
+                    reported_requested_mode = decode_controller.requested_mode();
+                    reported_active_mode = decode_controller.active_mode();
+                    set_status([&](WorkerStatus& state) {
+                        state.decode_requested =
+                            std::string(frame_decode_mode_name(reported_requested_mode));
+                        state.decode_active =
+                            std::string(frame_decode_mode_name(reported_active_mode));
+                    });
+                }
+            };
 
             while (!stopping_.load()) {
+                update_decode_mode(false);
                 auto read = source.read();
                 if (read.status == CameraReadStatus::again) {
                     continue;
@@ -726,6 +777,18 @@ class CameraWorker {
 
                 auto& sample = *read.sample;
                 ring.push(sample.packet);
+                if (sample.decoded_keyframe) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (last_keyframe_at) {
+                        const auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - *last_keyframe_at);
+                        set_status([&](WorkerStatus& state) {
+                            state.keyframe_interval_ms = interval.count();
+                        });
+                    }
+                    last_keyframe_at = now;
+                }
+                update_decode_mode(sample.packet.keyframe() || sample.decoded_keyframe);
                 if (!sample.frame) {
                     if (movie.is_open() && record_live) {
                         std::string error;
@@ -926,7 +989,7 @@ class CameraWorker {
                     const auto now = std::chrono::steady_clock::now();
                     const auto period =
                         std::chrono::milliseconds(1000 / std::max(1, config_.stream_maxrate));
-                    const bool stream_due = http_->wants_jpeg(std::to_string(config_.camera_id)) &&
+                    const bool stream_due = http_->wants_jpeg(camera_key) &&
                                             (last_http_publish.time_since_epoch().count() == 0 ||
                                              now - last_http_publish >= period);
                     if ((stream_due || snapshot_due) && !ensure_jpeg().empty()) {
@@ -1038,6 +1101,10 @@ class Application::Impl {
                    << ",\"noise_level\":" << static_cast<unsigned>(state.effective_noise_level)
                    << ",\"reconnects\":" << state.reconnects << ",\"error\":\""
                    << json_escape(redact_secrets(state.error)) << "\""
+                   << ",\"decode_frames\":\"" << json_escape(state.decode_frames) << "\""
+                   << ",\"decode_requested\":\"" << json_escape(state.decode_requested) << "\""
+                   << ",\"decode_active\":\"" << json_escape(state.decode_active) << "\""
+                   << ",\"keyframe_interval_ms\":" << state.keyframe_interval_ms
                    << ",\"onvif_profile\":\"" << json_escape(state.onvif_profile) << "\""
                    << ",\"onvif_profile_name\":\"" << json_escape(state.onvif_profile_name)
                    << "\",\"onvif_profile_width\":" << state.onvif_profile_width

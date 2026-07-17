@@ -32,6 +32,7 @@ struct CameraConfig {
     std::string onvif_motion_topics =
         "Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect";
     bool motion_detection = true;
+    std::string decode_frames = "all";
 
     int width = 640;
     int height = 480;

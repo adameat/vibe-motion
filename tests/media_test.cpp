@@ -239,5 +239,56 @@ int main(int, char** argv) {
     assert(packets > analyzed);
     throttled.close();
 
+    config.analysis_framerate = 0;
+    config.decode_mode = FrameDecodeMode::keyframes;
+    NetworkCameraSource keyframes_only(config);
+    assert(keyframes_only.open(&error));
+    int keyframe_images = 0;
+    int retained_packets = 0;
+    for (;;) {
+        auto result = keyframes_only.read();
+        if (result.status == CameraReadStatus::end_of_stream)
+            break;
+        if (result.status == CameraReadStatus::again)
+            continue;
+        assert(result.status == CameraReadStatus::sample);
+        assert(result.sample);
+        retained_packets += result.sample->packet.valid() ? 1 : 0;
+        if (result.sample->frame) {
+            assert(result.sample->decoded_keyframe);
+            ++keyframe_images;
+        }
+    }
+    assert(keyframe_images >= 2 && keyframe_images <= 4);
+    assert(retained_packets >= 25);
+    assert(retained_packets > keyframe_images);
+    keyframes_only.close();
+
+    NetworkCameraSource switching(config);
+    assert(switching.open(&error));
+    assert(switching.decode_mode() == FrameDecodeMode::keyframes);
+    int switched_images = 0;
+    bool switched = false;
+    for (;;) {
+        auto result = switching.read();
+        if (result.status == CameraReadStatus::end_of_stream)
+            break;
+        if (result.status == CameraReadStatus::again)
+            continue;
+        assert(result.status == CameraReadStatus::sample);
+        assert(result.sample);
+        if (result.sample->frame) {
+            ++switched_images;
+        }
+        if (!switched && result.sample->packet.keyframe()) {
+            switching.set_decode_mode(FrameDecodeMode::all);
+            switched = true;
+        }
+    }
+    assert(switched);
+    assert(switching.decode_mode() == FrameDecodeMode::all);
+    assert(switched_images >= 20);
+    switching.close();
+
     std::cout << "media tests passed\n";
 }
