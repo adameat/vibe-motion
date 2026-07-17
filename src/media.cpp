@@ -597,7 +597,11 @@ CameraReadResult NetworkCameraSource::read() {
         if (!detail::decoded_frame_usable(impl_->decoded.get())) {
             return {CameraReadStatus::sample, std::move(sample), {}};
         }
+#ifdef AV_FRAME_FLAG_KEY
         sample.decoded_keyframe = (impl_->decoded->flags & AV_FRAME_FLAG_KEY) != 0;
+#else
+        sample.decoded_keyframe = impl_->decoded->key_frame != 0;
+#endif
         // Some RTSP cameras omit dimensions from the initial codec parameters
         // and reveal them only after the first frame is decoded. StreamInfo is
         // shared with retained packets and movie writers, so keep it current.
