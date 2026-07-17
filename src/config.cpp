@@ -153,11 +153,41 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.netcam_params = value;
     else if (key == "netcam_use_tcp")
         c.netcam_use_tcp = boolean(value, location, key);
-    else if (key == "width")
-        c.width = integer(value, location, key);
-    else if (key == "height")
-        c.height = integer(value, location, key);
-    else if (key == "framerate")
+    else if (key == "onvif_url")
+        c.onvif_url = value;
+    else if (key == "onvif_userpass")
+        c.onvif_userpass = value;
+    else if (key == "onvif_profile")
+        c.onvif_profile = value;
+    else if (key == "onvif_auth")
+        c.onvif_auth = lower(trim(value));
+    else if (key == "onvif_events")
+        c.onvif_events = boolean(value, location, key);
+    else if (key == "onvif_log_events")
+        c.onvif_log_events = boolean(value, location, key);
+    else if (key == "onvif_tls_verify")
+        c.onvif_tls_verify = boolean(value, location, key);
+    else if (key == "onvif_motion_topics")
+        c.onvif_motion_topics = value;
+    else if (key == "motion_detection")
+        c.motion_detection = boolean(value, location, key);
+    else if (key == "width") {
+        if (lower(trim(value)) == "auto") {
+            c.width = CameraConfig{}.width;
+            c.width_configured = false;
+        } else {
+            c.width = integer(value, location, key);
+            c.width_configured = true;
+        }
+    } else if (key == "height") {
+        if (lower(trim(value)) == "auto") {
+            c.height = CameraConfig{}.height;
+            c.height_configured = false;
+        } else {
+            c.height = integer(value, location, key);
+            c.height_configured = true;
+        }
+    } else if (key == "framerate")
         c.framerate = integer(value, location, key);
     else if (key == "text_scale")
         c.text_scale = integer(value, location, key);
@@ -422,8 +452,21 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << (redact && !c.netcam_userpass.empty() ? "REDACTED" : c.netcam_userpass) << '\n'
         << "netcam_params " << c.netcam_params << '\n'
         << "netcam_use_tcp " << bool_text(c.netcam_use_tcp) << '\n'
-        << "width " << c.width << '\n'
-        << "height " << c.height << '\n'
+        << "onvif_url " << (redact ? redact_url(c.onvif_url) : c.onvif_url) << '\n'
+        << "onvif_userpass "
+        << (redact && !c.onvif_userpass.empty() ? "REDACTED" : c.onvif_userpass) << '\n'
+        << "onvif_profile " << c.onvif_profile << '\n'
+        << "onvif_auth " << c.onvif_auth << '\n'
+        << "onvif_events " << bool_text(c.onvif_events) << '\n'
+        << "onvif_log_events " << bool_text(c.onvif_log_events) << '\n'
+        << "onvif_tls_verify " << bool_text(c.onvif_tls_verify) << '\n'
+        << "onvif_motion_topics " << c.onvif_motion_topics << '\n'
+        << "motion_detection " << bool_text(c.motion_detection) << '\n'
+        << "width "
+        << (!c.onvif_url.empty() && !c.width_configured ? "auto" : std::to_string(c.width)) << '\n'
+        << "height "
+        << (!c.onvif_url.empty() && !c.height_configured ? "auto" : std::to_string(c.height))
+        << '\n'
         << "framerate " << c.framerate << '\n'
         << "text_scale " << c.text_scale << '\n'
         << "text_changes " << bool_text(c.text_changes) << '\n'
@@ -546,9 +589,23 @@ void Config::validate() const {
         check_range(ids.insert(c.camera_id).second, c, "duplicate camera_id");
         check_range(names.insert(c.camera_name).second, c, "duplicate camera_name");
         const std::string url = lower(trim(c.netcam_url));
-        check_range(url.rfind("rtsp://", 0) == 0 || url.rfind("rtmp://", 0) == 0 ||
-                        url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0,
-                    c, "netcam_url must use rtsp, rtmp, http, or https");
+        const std::string onvif_url = lower(trim(c.onvif_url));
+        const bool valid_media_url = url.rfind("rtsp://", 0) == 0 || url.rfind("rtmp://", 0) == 0 ||
+                                     url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+        const bool valid_onvif_url =
+            onvif_url.rfind("http://", 0) == 0 || onvif_url.rfind("https://", 0) == 0;
+        check_range(valid_media_url || valid_onvif_url, c,
+                    "netcam_url or an HTTP(S) onvif_url is required");
+        check_range(url.empty() || onvif_url.empty(), c,
+                    "netcam_url and onvif_url cannot be set together");
+        check_range(onvif_url.empty() || valid_onvif_url, c, "onvif_url must use http or https");
+        check_range(!c.onvif_events || valid_onvif_url, c, "onvif_events requires onvif_url");
+        check_range(!c.onvif_log_events || c.onvif_events, c,
+                    "onvif_log_events requires onvif_events");
+        check_range(!c.onvif_events || !trim(c.onvif_motion_topics).empty(), c,
+                    "onvif_motion_topics cannot be empty when events are enabled");
+        check_range(c.onvif_auth == "auto" || c.onvif_auth == "digest" || c.onvif_auth == "wsse", c,
+                    "onvif_auth must be auto, digest, or wsse");
         check_range(c.width > 0 && c.height > 0, c, "width and height must be positive");
         check_range(c.framerate > 0 && c.framerate <= 240, c,
                     "framerate must be between 1 and 240");

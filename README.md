@@ -12,9 +12,9 @@ service migration.
 
 ## Build
 
-The daemon requires Clang 22 and a coherent FFmpeg development installation containing
-`libavformat`, `libavcodec`, `libavutil`, and `libswscale`.  On this development
-host that installation lives under `/usr/local`.
+The daemon requires Clang 22, libcurl and libxml2 development headers, and a coherent
+FFmpeg development installation containing `libavformat`, `libavcodec`, `libavutil`, and
+`libswscale`. On this development host that FFmpeg installation lives under `/usr/local`.
 
 ```sh
 cmake -S . -B build-clang \
@@ -54,6 +54,63 @@ successfully. Network URLs are redacted from logs and config dumps.
 The web listener serves a small status page and JSON status plus Motion-style
 MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
 Motion web control actions and database features are out of scope.
+
+## ONVIF cameras
+
+`onvif_url` is the camera's Device Service endpoint, commonly
+`http://camera/onvif/device_service`. When it is present, `vibe-motion` discovers the Media
+service, gets the available profiles, and uses `GetStreamUri` instead of `netcam_url`.
+`onvif_profile` optionally selects an exact profile `Name` (a token is also accepted); without
+it the profile with the largest `width × height` is selected. `width` and `height` may be
+omitted for ONVIF cameras and then come from that profile. Explicit dimensions remain an
+analysis-scaling override. A camera file can use `width auto` and `height auto` to undo
+dimensions inherited from the main file.
+
+ONVIF event polling runs independently from successful stream discovery, so it can connect while
+media discovery is retrying. Both features use `onvif_url`; configuring it still makes the ONVIF
+`GetStreamUri` result the camera's media source, so event-only ONVIF alongside a separate
+`netcam_url` is not supported:
+
+```conf
+onvif_url http://192.0.2.20/onvif/device_service
+onvif_userpass user:password
+onvif_auth auto
+onvif_events on
+motion_detection off
+onvif_motion_topics Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect
+```
+
+`onvif_events on` creates a PullPoint subscription without a server-side topic filter and
+locally accepts the comma-separated topic fragments in `onvif_motion_topics`. This works
+with common topics such as `RuleEngine/CellMotionDetector/Motion` and
+`VideoSource/MotionAlarm`, plus Reolink smart topics such as `PeopleDetect`, `VehicleDetect`,
+`DogCatDetect`, and `FaceDetect`, while allowing other vendor topics to be added. Boolean
+`IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items drive the event state.
+Multiple rules/sources are tracked separately and combined by OR.
+
+Set `onvif_log_events on` while commissioning a camera to write every received notification
+as a single structured JSON object at info level. The record includes the raw topic, whether
+it matched a configured motion topic, whether a boolean state was found, UTC time, operation,
+Source/Key/Data items, and the serialized raw `NotificationMessage` XML subtree. This captures
+vendor-specific nested elements without logging the SOAP request's WS-Security header. Treat
+the payload as potentially sensitive camera metadata and disable this diagnostic option after
+commissioning. Unmatched notifications are diagnostic only and never trigger a motion event.
+
+`motion_detection on` (the default) keeps local pixel analysis enabled. With ONVIF events
+also enabled, either source can trigger an event. Set it to `off` when the camera's own
+analytics should be the only trigger; video decoding, snapshots, recording, timelapse, and
+streaming continue normally. `event_gap` still controls how long recording remains active
+after the external state becomes false.
+
+The JSON status reports subscription health, aggregate motion state, profile token, event
+count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
+media-discovery and event-subscription errors. `onvif_auth auto`
+first tries HTTP Digest and falls back to WS-Security UsernameToken PasswordDigest for cameras
+such as Reolink; `digest` and `wsse` force either mode. HTTPS certificates are verified by
+default; `onvif_tls_verify off` is available for explicitly trusted cameras with self-signed
+certificates. ONVIF device connections bypass environment HTTP proxies.
+
+See `examples/camera-onvif.conf` for a complete camera file.
 
 ## Migration from an existing Motion deployment
 

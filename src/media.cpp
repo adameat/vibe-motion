@@ -584,6 +584,17 @@ CameraReadResult NetworkCameraSource::read() {
         if (!detail::decoded_frame_usable(impl_->decoded.get())) {
             return {CameraReadStatus::sample, std::move(sample), {}};
         }
+        // Some RTSP cameras omit dimensions from the initial codec parameters
+        // and reveal them only after the first frame is decoded. StreamInfo is
+        // shared with retained packets and movie writers, so keep it current.
+        if (impl_->stream.impl_ && impl_->stream.impl_->parameters) {
+            if (impl_->stream.impl_->parameters->width <= 0) {
+                impl_->stream.impl_->parameters->width = impl_->decoded->width;
+            }
+            if (impl_->stream.impl_->parameters->height <= 0) {
+                impl_->stream.impl_->parameters->height = impl_->decoded->height;
+            }
+        }
         if (impl_->should_analyze(impl_->decoded.get())) {
             sample.frame = impl_->convert_gray(impl_->decoded.get());
         }

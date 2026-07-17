@@ -63,17 +63,24 @@ if(VIBE_ENABLE_CLANG_TIDY)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(CURL REQUIRED)
+find_package(LibXml2 REQUIRED)
 
 set(VIBE_CLANG_WARNINGS
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wextra-semi
   -Wimplicit-fallthrough -Wnewline-eof -Werror)
 
 find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
-  HINTS "${VIBE_FFMPEG_ROOT}/include" NO_DEFAULT_PATH)
+  HINTS "${VIBE_FFMPEG_ROOT}/include"
+        "${VIBE_FFMPEG_ROOT}/include/${CMAKE_LIBRARY_ARCHITECTURE}"
+  NO_DEFAULT_PATH)
 foreach(component avformat avcodec avutil swscale)
   string(TOUPPER "${component}" upper_component)
   find_library(FFMPEG_${upper_component}_LIBRARY NAMES ${component}
-    HINTS "${VIBE_FFMPEG_ROOT}/lib" "${VIBE_FFMPEG_ROOT}/lib64" NO_DEFAULT_PATH)
+    HINTS "${VIBE_FFMPEG_ROOT}/lib"
+          "${VIBE_FFMPEG_ROOT}/lib64"
+          "${VIBE_FFMPEG_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+    NO_DEFAULT_PATH)
   if(NOT FFMPEG_${upper_component}_LIBRARY)
     message(FATAL_ERROR "FFmpeg component ${component} was not found below ${VIBE_FFMPEG_ROOT}")
   endif()
@@ -89,9 +96,11 @@ add_library(vibe_motion_core
   src/media.cpp
   src/hooks.cpp
   src/http.cpp
+  src/onvif.cpp
   src/runtime.cpp)
 target_include_directories(vibe_motion_core PUBLIC include PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_link_libraries(vibe_motion_core PUBLIC Threads::Threads
+  CURL::libcurl LibXml2::LibXml2
   "${FFMPEG_AVFORMAT_LIBRARY}" "${FFMPEG_AVCODEC_LIBRARY}"
   "${FFMPEG_AVUTIL_LIBRARY}" "${FFMPEG_SWSCALE_LIBRARY}")
 target_compile_options(vibe_motion_core PRIVATE ${VIBE_CLANG_WARNINGS})
@@ -125,7 +134,7 @@ add_custom_target(tidy
 
 if(VIBE_BUILD_TESTS)
   enable_testing()
-  foreach(test_name detection event config hooks http media)
+  foreach(test_name detection event config hooks http media onvif)
     add_executable(${test_name}_test tests/${test_name}_test.cpp)
     target_link_libraries(${test_name}_test PRIVATE vibe_motion_core)
     target_compile_options(${test_name}_test PRIVATE ${VIBE_CLANG_WARNINGS})

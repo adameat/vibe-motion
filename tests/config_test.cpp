@@ -88,6 +88,30 @@ int main() {
     assert(rtmp_dump.find("alice") == std::string::npos);
     assert(rtmp_dump.find("secret") == std::string::npos);
 
+    const Config onvif =
+        ConfigParser().parse_string("camera cameras/onvif.conf\n", fixtures / "onvif-main.conf");
+    assert(onvif.cameras.size() == 1);
+    assert(onvif.cameras.front().netcam_url.empty());
+    assert(onvif.cameras.front().onvif_url.find("device_service") != std::string::npos);
+    assert(onvif.cameras.front().onvif_events);
+    assert(onvif.cameras.front().onvif_log_events);
+    assert(!onvif.cameras.front().onvif_tls_verify);
+    assert(!onvif.cameras.front().motion_detection);
+    assert(onvif.cameras.front().onvif_profile == "Profile_1");
+    assert(onvif.cameras.front().onvif_auth == "auto");
+    assert(!onvif.cameras.front().width_configured);
+    assert(!onvif.cameras.front().height_configured);
+    const CameraConfig defaults;
+    assert(onvif.cameras.front().width == defaults.width);
+    assert(onvif.cameras.front().height == defaults.height);
+    const std::string onvif_dump = onvif.dump_effective();
+    assert(onvif_dump.find("admin:secret") == std::string::npos);
+    assert(onvif_dump.find("onvif_userpass REDACTED") != std::string::npos);
+    assert(onvif_dump.find("motion_detection off") != std::string::npos);
+    assert(onvif_dump.find("onvif_log_events on") != std::string::npos);
+    assert(onvif_dump.find("width auto") != std::string::npos);
+    assert(onvif_dump.find("height auto") != std::string::npos);
+
     ExpansionContext context;
     context.camera_id = 3;
     context.event_number = 7;
@@ -130,6 +154,27 @@ int main() {
     expect_config_error([&] { load_config(fixtures / "invalid-main.conf"); });
     expect_config_error(
         [] { ConfigParser(ParseOptions{true, true}).parse_string("not_supported 1\n"); });
+    expect_config_error([] {
+        Config invalid;
+        CameraConfig camera;
+        camera.camera_id = 1;
+        camera.camera_name = "bad";
+        camera.onvif_events = true;
+        camera.movie_passthrough = true;
+        invalid.cameras.push_back(std::move(camera));
+        invalid.validate();
+    });
+    expect_config_error([] {
+        Config invalid;
+        CameraConfig camera;
+        camera.camera_id = 1;
+        camera.camera_name = "ambiguous";
+        camera.netcam_url = "rtsp://camera.example/stream";
+        camera.onvif_url = "http://camera.example/onvif/device_service";
+        camera.movie_output = false;
+        invalid.cameras.push_back(std::move(camera));
+        invalid.validate();
+    });
 
     std::cout << "config tests passed\n";
 }

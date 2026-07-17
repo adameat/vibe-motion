@@ -9,9 +9,9 @@ is included or copied.
 | Area | Options / behavior |
 | --- | --- |
 | Configuration | ordered `camera` includes, global inheritance, last value wins, quoted values, aliases, unknown-option diagnostics |
-| Sources | RTMP and RTSP, TCP transport option, input dictionary parameters, timeout and reconnect |
+| Sources | RTMP and RTSP, ONVIF Media profile/stream discovery, TCP transport option, input dictionary parameters, timeout and reconnect |
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
-| Event lifecycle | `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
+| Event lifecycle | local and/or ONVIF PullPoint motion triggers, `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
 | Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MKV/AVI MPEG-4 timelapse, automatic parent directories |
 | Hooks | event start/end, picture save, movie start/end; asynchronous argv execution and exit logging |
 | HTTP | one global listener, read-only status, latest JPEG, per-camera multipart MJPEG |
@@ -40,6 +40,10 @@ is included or copied.
   silently behaving differently.
 - The read-only HTTP routes are behavior-oriented; this is not a byte-for-byte
   clone of Motion's HTML interface or combined camera grid.
+- ONVIF SOAP authentication supports HTTP Digest and WS-Security UsernameToken
+  PasswordDigest, with automatic fallback. Event subscriptions are unfiltered
+  at the camera and motion topics are filtered locally using
+  `onvif_motion_topics` for better vendor compatibility.
 
 An excluded option that is active is never silently treated as implemented.
 Config validation reports it, while blank database options and known legacy

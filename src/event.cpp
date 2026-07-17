@@ -13,10 +13,13 @@ EventStateMachine::EventStateMachine(EventSettings settings) : settings_(setting
 }
 
 EventDecision EventStateMachine::update(bool qualifying_motion,
-                                        std::chrono::steady_clock::time_point now) {
+                                        std::chrono::steady_clock::time_point now,
+                                        bool force_confirm) {
     EventDecision decision;
     if (qualifying_motion) {
-        consecutive_motion_ = std::min(consecutive_motion_ + 1, settings_.minimum_motion_frames);
+        consecutive_motion_ =
+            force_confirm ? settings_.minimum_motion_frames
+                          : std::min(consecutive_motion_ + 1, settings_.minimum_motion_frames);
     } else {
         consecutive_motion_ = 0;
     }

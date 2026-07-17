@@ -37,5 +37,9 @@ int main() {
     assert(state.stop().event_ended);
     assert(!state.stop().event_ended);
 
+    EventStateMachine externally_confirmed({5, 30s, 0});
+    decision = externally_confirmed.update(true, start, true);
+    assert(decision.event_started && decision.motion_detected && decision.event_number == 1);
+
     std::cout << "event tests passed\n";
 }
