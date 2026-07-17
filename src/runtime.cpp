@@ -246,7 +246,8 @@ struct WorkerStatus {
     std::string onvif_profile_name;
     int onvif_profile_width = 0;
     int onvif_profile_height = 0;
-    std::string onvif_error;
+    std::string onvif_media_error;
+    std::string onvif_events_error;
     std::string error;
 };
 
@@ -416,7 +417,7 @@ class CameraWorker {
                 set_status([&](WorkerStatus& state) {
                     state.onvif_events_connected = connected;
                     state.onvif_motion = connected && onvif_motion_.load();
-                    state.onvif_error = redact_secrets(error);
+                    state.onvif_events_error = redact_secrets(error);
                 });
                 if (!error.empty()) {
                     Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
@@ -590,6 +591,10 @@ class CameraWorker {
         int onvif_trigger_frames = 0;
         std::optional<std::chrono::system_clock::time_point> pending_onvif_event_time;
         std::optional<OnvifStream> onvif_stream;
+        std::optional<OnvifClient> onvif_client;
+        if (!config_.onvif_url.empty()) {
+            onvif_client.emplace(onvif_config());
+        }
 
         while (!stopping_.load()) {
             std::string media_url = config_.netcam_url;
@@ -597,7 +602,7 @@ class CameraWorker {
             int analysis_height = config_.height;
             if (!config_.onvif_url.empty()) {
                 try {
-                    OnvifStream resolved = OnvifClient(onvif_config()).resolve_stream();
+                    OnvifStream resolved = onvif_client->resolve_stream();
                     const bool newly_resolved =
                         !onvif_stream || onvif_stream->uri != resolved.uri ||
                         onvif_stream->profile_token != resolved.profile_token;
@@ -615,7 +620,7 @@ class CameraWorker {
                         state.onvif_profile_name = stream.profile_name;
                         state.onvif_profile_width = stream.width;
                         state.onvif_profile_height = stream.height;
-                        state.onvif_error.clear();
+                        state.onvif_media_error.clear();
                     });
                     if (newly_resolved) {
                         Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
@@ -629,7 +634,7 @@ class CameraWorker {
                         state.connected = false;
                         ++state.reconnects;
                         state.error = safe_error;
-                        state.onvif_error = safe_error;
+                        state.onvif_media_error = safe_error;
                     });
                     Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                              ": ONVIF media discovery: ", safe_error);
@@ -1013,6 +1018,13 @@ class Application::Impl {
         bool first = true;
         for (const auto& worker : workers_) {
             const auto state = worker->status();
+            std::string onvif_error = state.onvif_media_error;
+            if (!state.onvif_events_error.empty()) {
+                if (!onvif_error.empty()) {
+                    onvif_error += "; ";
+                }
+                onvif_error += state.onvif_events_error;
+            }
             if (!first)
                 output << ',';
             first = false;
@@ -1047,8 +1059,11 @@ class Application::Impl {
             append_json_map(output, state.onvif_event_key_items);
             output << ",\"data\":";
             append_json_map(output, state.onvif_event_data);
-            output << '}' << ",\"onvif_error\":\"" << json_escape(redact_secrets(state.onvif_error))
-                   << "\"}";
+            output << '}' << ",\"onvif_media_error\":\""
+                   << json_escape(redact_secrets(state.onvif_media_error))
+                   << "\",\"onvif_events_error\":\""
+                   << json_escape(redact_secrets(state.onvif_events_error))
+                   << "\",\"onvif_error\":\"" << json_escape(redact_secrets(onvif_error)) << "\"}";
         }
         output << "]}";
         return output.str();

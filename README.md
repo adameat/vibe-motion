@@ -103,7 +103,8 @@ streaming continue normally. `event_gap` still controls how long recording remai
 after the external state becomes false.
 
 The JSON status reports subscription health, aggregate motion state, profile token, event
-count, last topic, UTC time, and the last event's ONVIF Source/Data metadata. `onvif_auth auto`
+count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
+media-discovery and event-subscription errors. `onvif_auth auto`
 first tries HTTP Digest and falls back to WS-Security UsernameToken PasswordDigest for cameras
 such as Reolink; `digest` and `wsse` force either mode. HTTPS certificates are verified by
 default; `onvif_tls_verify off` is available for explicitly trusted cameras with self-signed
