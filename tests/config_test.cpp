@@ -97,6 +97,7 @@ int main() {
     assert(onvif.cameras.front().onvif_log_events);
     assert(!onvif.cameras.front().onvif_tls_verify);
     assert(!onvif.cameras.front().motion_detection);
+    assert(onvif.cameras.front().decode_frames == "auto");
     assert(onvif.cameras.front().onvif_profile == "Profile_1");
     assert(onvif.cameras.front().onvif_auth == "auto");
     assert(!onvif.cameras.front().width_configured);
@@ -108,6 +109,7 @@ int main() {
     assert(onvif_dump.find("admin:secret") == std::string::npos);
     assert(onvif_dump.find("onvif_userpass REDACTED") != std::string::npos);
     assert(onvif_dump.find("motion_detection off") != std::string::npos);
+    assert(onvif_dump.find("decode_frames auto") != std::string::npos);
     assert(onvif_dump.find("onvif_log_events on") != std::string::npos);
     assert(onvif_dump.find("width auto") != std::string::npos);
     assert(onvif_dump.find("height auto") != std::string::npos);
@@ -173,6 +175,11 @@ int main() {
         camera.onvif_url = "http://camera.example/onvif/device_service";
         camera.movie_output = false;
         invalid.cameras.push_back(std::move(camera));
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = onvif;
+        invalid.cameras.front().decode_frames = "sometimes";
         invalid.validate();
     });
 

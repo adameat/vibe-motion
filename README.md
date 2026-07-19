@@ -77,6 +77,7 @@ onvif_userpass user:password
 onvif_auth auto
 onvif_events on
 motion_detection off
+decode_frames auto
 onvif_motion_topics Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect
 ```
 
@@ -101,6 +102,20 @@ also enabled, either source can trigger an event. Set it to `off` when the camer
 analytics should be the only trigger; video decoding, snapshots, recording, timelapse, and
 streaming continue normally. `event_gap` still controls how long recording remains active
 after the external state becomes false.
+
+`decode_frames` controls decoder CPU independently from compressed passthrough recording:
+
+- `all` is the compatibility-preserving default and decodes every video frame;
+- `keyframes` always decodes keyframes only;
+- `auto` uses keyframe-only decoding while idle when ONVIF events are enabled and local
+  `motion_detection` is off. An HTTP snapshot or MJPEG consumer requests full decoding; the
+  camera worker switches after the next decoded keyframe without reconnecting and returns to
+  keyframe-only decoding five seconds after the last consumer leaves.
+
+Every compressed packet still enters the pre-capture ring and an active passthrough movie.
+Snapshots, event pictures, and timelapse use decoded keyframes while idle, so their maximum
+idle cadence is limited by the camera's GOP/keyframe interval. The JSON status exposes the
+configured, requested, and active decode modes plus the latest observed keyframe interval.
 
 The JSON status reports subscription health, aggregate motion state, profile token, event
 count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate

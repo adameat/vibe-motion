@@ -9,7 +9,7 @@ is included or copied.
 | Area | Options / behavior |
 | --- | --- |
 | Configuration | ordered `camera` includes, global inheritance, last value wins, quoted values, aliases, unknown-option diagnostics |
-| Sources | RTMP and RTSP, ONVIF Media profile/stream discovery, TCP transport option, input dictionary parameters, timeout and reconnect |
+| Sources | RTMP and RTSP, ONVIF Media profile/stream discovery, TCP transport option, input dictionary parameters, timeout and reconnect, full/keyframe/automatic decode modes |
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
 | Event lifecycle | local and/or ONVIF PullPoint motion triggers, `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
 | Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MKV/AVI MPEG-4 timelapse, automatic parent directories |

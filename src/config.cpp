@@ -171,6 +171,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.onvif_motion_topics = value;
     else if (key == "motion_detection")
         c.motion_detection = boolean(value, location, key);
+    else if (key == "decode_frames")
+        c.decode_frames = lower(trim(value));
     else if (key == "width") {
         if (lower(trim(value)) == "auto") {
             c.width = CameraConfig{}.width;
@@ -462,6 +464,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "onvif_tls_verify " << bool_text(c.onvif_tls_verify) << '\n'
         << "onvif_motion_topics " << c.onvif_motion_topics << '\n'
         << "motion_detection " << bool_text(c.motion_detection) << '\n'
+        << "decode_frames " << c.decode_frames << '\n'
         << "width "
         << (!c.onvif_url.empty() && !c.width_configured ? "auto" : std::to_string(c.width)) << '\n'
         << "height "
@@ -606,6 +609,9 @@ void Config::validate() const {
                     "onvif_motion_topics cannot be empty when events are enabled");
         check_range(c.onvif_auth == "auto" || c.onvif_auth == "digest" || c.onvif_auth == "wsse", c,
                     "onvif_auth must be auto, digest, or wsse");
+        check_range(c.decode_frames == "all" || c.decode_frames == "keyframes" ||
+                        c.decode_frames == "auto",
+                    c, "decode_frames must be all, keyframes, or auto");
         check_range(c.width > 0 && c.height > 0, c, "width and height must be positive");
         check_range(c.framerate > 0 && c.framerate <= 240, c,
                     "framerate must be between 1 and 240");

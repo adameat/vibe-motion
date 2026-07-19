@@ -91,6 +91,7 @@ endif()
 
 add_library(vibe_motion_core
   src/config.cpp
+  src/decode.cpp
   src/detection.cpp
   src/event.cpp
   src/media.cpp
@@ -134,7 +135,7 @@ add_custom_target(tidy
 
 if(VIBE_BUILD_TESTS)
   enable_testing()
-  foreach(test_name detection event config hooks http media onvif)
+  foreach(test_name decode detection event config hooks http media onvif)
     add_executable(${test_name}_test tests/${test_name}_test.cpp)
     target_link_libraries(${test_name}_test PRIVATE vibe_motion_core)
     target_compile_options(${test_name}_test PRIVATE ${VIBE_CLANG_WARNINGS})
