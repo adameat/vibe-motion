@@ -737,12 +737,12 @@ class CameraWorker {
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id, " connected (",
                                      source.stream_info().codec_name(), ")");
             const auto warm_until = std::chrono::steady_clock::now() + 2s;
-            const auto update_decode_mode = [&](bool decoded_keyframe) {
+            const auto update_decode_mode = [&](bool keyframe_boundary) {
                 const auto now = std::chrono::steady_clock::now();
                 const bool wants_full_decode =
                     dynamic_full_decode && http_ != nullptr && http_->wants_jpeg(camera_key);
                 if (const auto transition =
-                        decode_controller.update(wants_full_decode, decoded_keyframe, now)) {
+                        decode_controller.update(wants_full_decode, keyframe_boundary, now)) {
                     source.set_decode_mode(*transition);
                 }
                 if (decode_controller.requested_mode() != reported_requested_mode ||
