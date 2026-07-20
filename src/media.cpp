@@ -9,17 +9,21 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/log.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -90,6 +94,66 @@ PacketPtr make_packet() {
     return PacketPtr(av_packet_alloc());
 }
 
+std::string normalized_codec(std::string codec) {
+    std::transform(codec.begin(), codec.end(), codec.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    if (codec == "h265" || codec == "x265" || codec == "libx265") {
+        return "hevc";
+    }
+    if (codec == "passthrough") {
+        return "copy";
+    }
+    return codec;
+}
+
+AVCodecID codec_id_for_name(const std::string& requested) {
+    const std::string codec = normalized_codec(requested);
+    if (codec == "mpeg4")
+        return AV_CODEC_ID_MPEG4;
+    if (codec == "h264")
+        return AV_CODEC_ID_H264;
+    if (codec == "hevc")
+        return AV_CODEC_ID_HEVC;
+    return AV_CODEC_ID_NONE;
+}
+
+bool codec_matches(AVCodecID actual, const std::string& requested) {
+    const std::string codec = normalized_codec(requested);
+    return codec == "copy" || actual == codec_id_for_name(codec);
+}
+
+const AVCodec* find_requested_encoder(const std::string& codec_name,
+                                      const std::string& encoder_name) {
+    const AVCodecID codec_id = codec_id_for_name(codec_name);
+    if (codec_id == AV_CODEC_ID_NONE) {
+        return nullptr;
+    }
+    const AVCodec* codec = nullptr;
+    if (!encoder_name.empty()) {
+        codec = avcodec_find_encoder_by_name(encoder_name.c_str());
+    } else if (codec_id == AV_CODEC_ID_HEVC) {
+        codec = avcodec_find_encoder_by_name("libx265");
+    }
+    if (codec == nullptr && encoder_name.empty()) {
+        codec = avcodec_find_encoder(codec_id);
+    }
+    return codec != nullptr && codec->id == codec_id ? codec : nullptr;
+}
+
+unsigned int mp4_codec_tag(AVCodecID codec_id) {
+    const auto tag = [](char a, char b, char c, char d) {
+        return static_cast<unsigned int>(static_cast<unsigned char>(a)) |
+               (static_cast<unsigned int>(static_cast<unsigned char>(b)) << 8U) |
+               (static_cast<unsigned int>(static_cast<unsigned char>(c)) << 16U) |
+               (static_cast<unsigned int>(static_cast<unsigned char>(d)) << 24U);
+    };
+    if (codec_id == AV_CODEC_ID_HEVC)
+        return tag('h', 'v', 'c', '1');
+    if (codec_id == AV_CODEC_ID_H264)
+        return tag('a', 'v', 'c', '1');
+    return 0;
+}
+
 bool allocate_video_frame(AVFrame* frame, AVPixelFormat format, int width, int height,
                           std::string* error) {
     frame->format = format;
@@ -104,6 +168,44 @@ bool allocate_video_frame(AVFrame* frame, AVPixelFormat format, int width, int h
 }
 
 } // namespace
+
+bool video_encoder_available(const std::string& codec, const std::string& encoder,
+                             std::string* selected_encoder) {
+    const AVCodec* selected = find_requested_encoder(codec, encoder);
+    if (selected_encoder != nullptr) {
+        *selected_encoder = selected != nullptr ? selected->name : std::string{};
+    }
+    if (selected == nullptr)
+        return false;
+    static std::mutex cache_mutex;
+    static std::map<std::string, bool> cache;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        if (const auto found = cache.find(selected->name); found != cache.end())
+            return found->second;
+    }
+    auto context = CodecPtr(avcodec_alloc_context3(selected));
+    if (!context)
+        return false;
+    context->width = 64;
+    context->height = 64;
+    context->pix_fmt = AV_PIX_FMT_YUV420P;
+    context->time_base = AVRational{1, 1};
+    context->framerate = AVRational{1, 1};
+    context->gop_size = 10;
+    context->bit_rate = 400000;
+    AVDictionary* options = nullptr;
+    if (std::string(selected->name) == "libx265")
+        av_dict_set(&options, "x265-params", "log-level=error", 0);
+    const int result = avcodec_open2(context.get(), selected, &options);
+    av_dict_free(&options);
+    const bool available = result >= 0;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[selected->name] = available;
+    }
+    return available;
+}
 
 namespace detail {
 
@@ -123,6 +225,7 @@ bool decoded_frame_usable(const AVFrame* frame) noexcept {
 struct StreamInfo::Impl {
     AVCodecParameters* parameters = nullptr;
     AVRational time_base{0, 1};
+    AVRational frame_rate{0, 1};
 
     Impl() : parameters(avcodec_parameters_alloc()) {}
     ~Impl() {
@@ -556,6 +659,7 @@ bool NetworkCameraSource::open(std::string* error) {
         return false;
     }
     stream_impl->time_base = input_stream->time_base;
+    stream_impl->frame_rate = av_guess_frame_rate(context, input_stream, nullptr);
     impl_->stream = StreamInfo(std::move(stream_impl));
     impl_->output_width = impl_->config.width > 0 ? impl_->config.width : impl_->decoder->width;
     impl_->output_height = impl_->config.height > 0 ? impl_->config.height : impl_->decoder->height;
@@ -762,6 +866,224 @@ std::vector<VideoPacket> PacketRing::snapshot_from_latest_keyframe() const {
     return {begin, packets_.end()};
 }
 
+struct PacketTranscoder {
+    AVFormatContext* format = nullptr;
+    AVStream* output_stream = nullptr;
+    StreamInfo source;
+    CodecPtr decoder;
+    CodecPtr encoder;
+    FramePtr decoded;
+    FramePtr converted;
+    SwsContext* scaler = nullptr;
+    AVRational encoder_time_base{0, 1};
+    std::int64_t base_pts = AV_NOPTS_VALUE;
+    std::int64_t last_pts = AV_NOPTS_VALUE;
+    bool started = false;
+    bool flushed = false;
+
+    ~PacketTranscoder() {
+        sws_freeContext(scaler);
+    }
+
+    bool open(AVFormatContext* output_format, const StreamInfo& input,
+              const VideoEncodeOptions& options, std::string* error) {
+        format = output_format;
+        source = input;
+        const AVCodec* decoder_codec = avcodec_find_decoder(input.impl_->parameters->codec_id);
+        const AVCodec* encoder_codec = find_requested_encoder(options.codec, options.encoder);
+        decoder.reset(decoder_codec ? avcodec_alloc_context3(decoder_codec) : nullptr);
+        encoder.reset(encoder_codec ? avcodec_alloc_context3(encoder_codec) : nullptr);
+        decoded = make_frame();
+        converted = make_frame();
+        if (!format || !decoder || !encoder || !decoded || !converted) {
+            set_error(error, "cannot allocate video transcoder");
+            return false;
+        }
+        int result = avcodec_parameters_to_context(decoder.get(), input.impl_->parameters);
+        decoder->pkt_timebase = input.impl_->time_base;
+        if (result >= 0)
+            result = avcodec_open2(decoder.get(), decoder_codec, nullptr);
+        if (result < 0) {
+            set_error(error, "cannot open transcode decoder: " + ff_error(result));
+            return false;
+        }
+
+        const int width = input.impl_->parameters->width;
+        const int height = input.impl_->parameters->height;
+        AVRational frame_rate = input.impl_->frame_rate;
+        if (width <= 0 || height <= 0) {
+            set_error(error, "cannot transcode a stream with unknown dimensions");
+            return false;
+        }
+        if (frame_rate.num <= 0 || frame_rate.den <= 0)
+            frame_rate = AVRational{25, 1};
+        encoder_time_base = av_inv_q(frame_rate);
+        encoder->codec_type = AVMEDIA_TYPE_VIDEO;
+        encoder->codec_id = encoder_codec->id;
+        encoder->width = width;
+        encoder->height = height;
+        encoder->pix_fmt = AV_PIX_FMT_YUV420P;
+        encoder->time_base = encoder_time_base;
+        encoder->framerate = frame_rate;
+        const double fps = av_q2d(frame_rate);
+        encoder->gop_size = std::max(1, static_cast<int>(fps * options.keyframe_interval + 0.5));
+        encoder->max_b_frames = 0;
+        AVDictionary* encoder_options = nullptr;
+        if (options.quality > 0) {
+            const std::string crf = std::to_string((100 - options.quality) * 51 / 100);
+            av_dict_set(&encoder_options, "crf", crf.c_str(), 0);
+        } else if (options.bitrate > 0) {
+            encoder->bit_rate = options.bitrate;
+        } else {
+            encoder->bit_rate = std::max<std::int64_t>(
+                400000, static_cast<std::int64_t>(width) * height *
+                            std::max<std::int64_t>(1, static_cast<std::int64_t>(fps)) / 5);
+        }
+        if (std::string(encoder_codec->name) == "libx265")
+            av_dict_set(&encoder_options, "x265-params", "log-level=error", 0);
+        if (options.low_latency) {
+            av_dict_set(&encoder_options, "preset", "veryfast", 0);
+            av_dict_set(&encoder_options, "tune", "zerolatency", 0);
+        }
+        if ((format->oformat->flags & AVFMT_GLOBALHEADER) != 0)
+            encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        result = avcodec_open2(encoder.get(), encoder_codec, &encoder_options);
+        av_dict_free(&encoder_options);
+        if (result < 0) {
+            set_error(error, "cannot open transcode encoder: " + ff_error(result));
+            return false;
+        }
+        if (!allocate_video_frame(converted.get(), encoder->pix_fmt, width, height, error))
+            return false;
+        output_stream = avformat_new_stream(format, nullptr);
+        if (!output_stream) {
+            set_error(error, "cannot allocate transcoded output stream");
+            return false;
+        }
+        result = avcodec_parameters_from_context(output_stream->codecpar, encoder.get());
+        if (result < 0) {
+            set_error(error, "cannot copy transcoded codec parameters: " + ff_error(result));
+            return false;
+        }
+        output_stream->time_base = encoder_time_base;
+        output_stream->codecpar->codec_tag = 0;
+        return true;
+    }
+
+    bool write_encoded_packets(std::string* error) {
+        auto packet = make_packet();
+        if (!packet) {
+            set_error(error, "cannot allocate encoded packet");
+            return false;
+        }
+        for (;;) {
+            const int result = avcodec_receive_packet(encoder.get(), packet.get());
+            if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+                return true;
+            if (result < 0) {
+                set_error(error, "cannot receive transcoded packet: " + ff_error(result));
+                return false;
+            }
+            av_packet_rescale_ts(packet.get(), encoder->time_base, output_stream->time_base);
+            packet->stream_index = output_stream->index;
+            packet->pos = -1;
+            const int write_result = av_interleaved_write_frame(format, packet.get());
+            if (write_result < 0) {
+                set_error(error, "cannot write transcoded packet: " + ff_error(write_result));
+                return false;
+            }
+            av_packet_unref(packet.get());
+        }
+    }
+
+    bool encode_frame(AVFrame* input, std::string* error) {
+        scaler = sws_getCachedContext(
+            scaler, input->width, input->height, static_cast<AVPixelFormat>(input->format),
+            converted->width, converted->height, static_cast<AVPixelFormat>(converted->format),
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!scaler || av_frame_make_writable(converted.get()) < 0 ||
+            sws_scale(scaler, input->data, input->linesize, 0, input->height, converted->data,
+                      converted->linesize) <= 0) {
+            set_error(error, "cannot convert frame for transcoding");
+            return false;
+        }
+        std::int64_t pts = input->best_effort_timestamp;
+        if (pts == AV_NOPTS_VALUE)
+            pts = input->pts;
+        if (base_pts == AV_NOPTS_VALUE)
+            base_pts = pts;
+        if (pts != AV_NOPTS_VALUE && base_pts != AV_NOPTS_VALUE)
+            pts = av_rescale_q(pts - base_pts, source.impl_->time_base, encoder_time_base);
+        if (pts == AV_NOPTS_VALUE || (last_pts != AV_NOPTS_VALUE && pts <= last_pts))
+            pts = last_pts == AV_NOPTS_VALUE ? 0 : last_pts + 1;
+        last_pts = pts;
+        converted->pts = pts;
+        converted->pict_type = AV_PICTURE_TYPE_NONE;
+        int result = avcodec_send_frame(encoder.get(), converted.get());
+        if (result == AVERROR(EAGAIN)) {
+            if (!write_encoded_packets(error))
+                return false;
+            result = avcodec_send_frame(encoder.get(), converted.get());
+        }
+        if (result < 0) {
+            set_error(error, "cannot submit transcoded frame: " + ff_error(result));
+            return false;
+        }
+        return write_encoded_packets(error);
+    }
+
+    bool receive_frames(std::string* error) {
+        for (;;) {
+            av_frame_unref(decoded.get());
+            const int result = avcodec_receive_frame(decoder.get(), decoded.get());
+            if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+                return true;
+            if (result < 0) {
+                set_error(error, "cannot decode packet for transcoding: " + ff_error(result));
+                return false;
+            }
+            if (!detail::decoded_frame_usable(decoded.get()))
+                continue;
+            if (!encode_frame(decoded.get(), error))
+                return false;
+        }
+    }
+
+    bool write(const VideoPacket& input, std::string* error) {
+        if (!input.valid())
+            return true;
+        if (!started && !input.keyframe())
+            return true;
+        started = true;
+        int result = avcodec_send_packet(decoder.get(), input.impl_->packet.get());
+        if (result == AVERROR(EAGAIN)) {
+            if (!receive_frames(error))
+                return false;
+            result = avcodec_send_packet(decoder.get(), input.impl_->packet.get());
+        }
+        if (result < 0) {
+            set_error(error, "cannot submit packet for transcoding: " + ff_error(result));
+            return false;
+        }
+        return receive_frames(error);
+    }
+
+    bool flush(std::string* error) {
+        if (flushed)
+            return true;
+        flushed = true;
+        int result = avcodec_send_packet(decoder.get(), nullptr);
+        if (result >= 0 && !receive_frames(error))
+            return false;
+        result = avcodec_send_frame(encoder.get(), nullptr);
+        if (result < 0 && result != AVERROR_EOF) {
+            set_error(error, "cannot flush transcode encoder: " + ff_error(result));
+            return false;
+        }
+        return write_encoded_packets(error);
+    }
+};
+
 struct EventMovieWriter::Impl {
     AVFormatContext* format = nullptr;
     AVStream* output_stream = nullptr;
@@ -770,6 +1092,8 @@ struct EventMovieWriter::Impl {
     bool timestamp_base_set = false;
     std::int64_t base_dts = AV_NOPTS_VALUE;
     std::int64_t last_dts = AV_NOPTS_VALUE;
+    bool wrote_packet = false;
+    std::unique_ptr<PacketTranscoder> transcoder;
 
     ~Impl() {
         close(nullptr);
@@ -783,6 +1107,8 @@ struct EventMovieWriter::Impl {
         if (!input.valid()) {
             return true; // Decoder-drain samples do not carry a new packet.
         }
+        if (transcoder)
+            return transcoder->write(input, error);
         if (!input.stream().valid()) {
             set_error(error, "movie packet has no stream information");
             return false;
@@ -792,6 +1118,9 @@ struct EventMovieWriter::Impl {
             return false;
         }
         if ((input.impl_->packet->flags & AV_PKT_FLAG_DISCARD) != 0) {
+            return true;
+        }
+        if (!wrote_packet && !input.keyframe()) {
             return true;
         }
         auto packet = make_packet();
@@ -830,12 +1159,20 @@ struct EventMovieWriter::Impl {
             set_error(error, "cannot write movie packet: " + ff_error(result));
             return false;
         }
+        wrote_packet = true;
         return true;
     }
 
     bool close(std::string* error) noexcept {
         bool success = true;
         if (format != nullptr) {
+            if (transcoder && header_written) {
+                try {
+                    success = transcoder->flush(error);
+                } catch (...) {
+                    success = false;
+                }
+            }
             if (header_written) {
                 const int result = av_write_trailer(format);
                 if (result < 0) {
@@ -857,6 +1194,8 @@ struct EventMovieWriter::Impl {
         header_written = false;
         timestamp_base_set = false;
         base_dts = last_dts = AV_NOPTS_VALUE;
+        wrote_packet = false;
+        transcoder.reset();
         return success;
     }
 };
@@ -868,6 +1207,10 @@ EventMovieWriter::~EventMovieWriter() = default;
 EventMovieWriter::EventMovieWriter(EventMovieWriter&&) noexcept = default;
 EventMovieWriter& EventMovieWriter::operator=(EventMovieWriter&&) noexcept = default;
 bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream, std::string* error) {
+    return open(path, stream, VideoEncodeOptions{}, error);
+}
+bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
+                            const VideoEncodeOptions& options, std::string* error) {
     impl_->close(nullptr);
     if (!stream.valid()) {
         set_error(error, "cannot open movie without stream information");
@@ -878,20 +1221,52 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream, s
         set_error(error, "cannot select movie container: " + ff_error(result));
         return false;
     }
-    impl_->output_stream = avformat_new_stream(impl_->format, nullptr);
-    if (impl_->output_stream == nullptr) {
-        set_error(error, "cannot allocate output video stream");
+    const std::string codec = normalized_codec(options.codec);
+    const AVCodecID output_codec =
+        codec == "copy" ? stream.impl_->parameters->codec_id : codec_id_for_name(codec);
+    if (output_codec == AV_CODEC_ID_NONE) {
+        set_error(error, "unsupported movie codec " + options.codec);
         impl_->close(nullptr);
         return false;
     }
-    result = avcodec_parameters_copy(impl_->output_stream->codecpar, stream.impl_->parameters);
-    if (result < 0) {
-        set_error(error, "cannot copy output codec parameters: " + ff_error(result));
+    if (avformat_query_codec(impl_->format->oformat, output_codec, FF_COMPLIANCE_NORMAL) == 0) {
+        set_error(error, "movie container does not support output codec " +
+                             std::string(avcodec_get_name(output_codec)));
         impl_->close(nullptr);
         return false;
     }
-    impl_->output_stream->codecpar->codec_tag = 0;
-    impl_->output_stream->time_base = stream.impl_->time_base;
+    if (codec == "copy") {
+        impl_->output_stream = avformat_new_stream(impl_->format, nullptr);
+        if (impl_->output_stream == nullptr) {
+            set_error(error, "cannot allocate output video stream");
+            impl_->close(nullptr);
+            return false;
+        }
+        result = avcodec_parameters_copy(impl_->output_stream->codecpar, stream.impl_->parameters);
+        if (result < 0) {
+            set_error(error, "cannot copy output codec parameters: " + ff_error(result));
+            impl_->close(nullptr);
+            return false;
+        }
+        impl_->output_stream->codecpar->codec_tag = 0;
+        if (std::string(impl_->format->oformat->name).find("mp4") != std::string::npos ||
+            std::string(impl_->format->oformat->name).find("mov") != std::string::npos) {
+            impl_->output_stream->codecpar->codec_tag =
+                mp4_codec_tag(impl_->output_stream->codecpar->codec_id);
+        }
+        impl_->output_stream->time_base = stream.impl_->time_base;
+    } else {
+        impl_->transcoder = std::make_unique<PacketTranscoder>();
+        if (!impl_->transcoder->open(impl_->format, stream, options, error)) {
+            impl_->close(nullptr);
+            return false;
+        }
+        impl_->output_stream = impl_->transcoder->output_stream;
+        if (std::string(impl_->format->oformat->name).find("mp4") != std::string::npos ||
+            std::string(impl_->format->oformat->name).find("mov") != std::string::npos) {
+            impl_->output_stream->codecpar->codec_tag = mp4_codec_tag(output_codec);
+        }
+    }
     if ((impl_->format->oformat->flags & AVFMT_NOFILE) == 0) {
         result = avio_open(&impl_->format->pb, path.c_str(), AVIO_FLAG_WRITE);
         if (result < 0) {
@@ -925,6 +1300,203 @@ bool EventMovieWriter::close(std::string* error) noexcept {
     return impl_->close(error);
 }
 bool EventMovieWriter::is_open() const noexcept {
+    return impl_ && impl_->format != nullptr;
+}
+
+struct FragmentedMp4Writer::Impl {
+    AVFormatContext* format = nullptr;
+    AVStream* output_stream = nullptr;
+    AVIOContext* io = nullptr;
+    StreamInfo source;
+    WriteCallback output;
+    bool header_written = false;
+    bool wrote_packet = false;
+    std::int64_t base_dts = AV_NOPTS_VALUE;
+    std::int64_t last_dts = AV_NOPTS_VALUE;
+    std::unique_ptr<PacketTranscoder> transcoder;
+
+    ~Impl() {
+        close(nullptr);
+    }
+
+    static int write_bytes(void* opaque,
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+                           const std::uint8_t* buffer,
+#else
+                           std::uint8_t* buffer,
+#endif
+                           int size) noexcept {
+        auto* self = static_cast<Impl*>(opaque);
+        try {
+            return self->output && self->output(buffer, static_cast<std::size_t>(size))
+                       ? size
+                       : AVERROR(EIO);
+        } catch (...) {
+            return AVERROR(EIO);
+        }
+    }
+
+    bool write(const VideoPacket& input, std::string* error) {
+        if (format == nullptr || !input.valid())
+            return format != nullptr;
+        if (transcoder)
+            return transcoder->write(input, error);
+        if (!codec_matches(input.stream().impl_->parameters->codec_id, source.codec_name())) {
+            set_error(error, "web stream packet codec changed");
+            return false;
+        }
+        if (!wrote_packet && !input.keyframe())
+            return true;
+        auto packet = make_packet();
+        if (!packet || av_packet_ref(packet.get(), input.impl_->packet.get()) < 0) {
+            set_error(error, "cannot clone web stream packet");
+            return false;
+        }
+        if (!wrote_packet) {
+            base_dts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
+        }
+        if (packet->dts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE)
+            packet->dts -= base_dts;
+        if (packet->pts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE)
+            packet->pts -= base_dts;
+        av_packet_rescale_ts(packet.get(), source.impl_->time_base, output_stream->time_base);
+        if (packet->dts == AV_NOPTS_VALUE)
+            packet->dts = last_dts == AV_NOPTS_VALUE ? 0 : last_dts + 1;
+        if (last_dts != AV_NOPTS_VALUE && packet->dts <= last_dts)
+            packet->dts = last_dts + 1;
+        if (packet->pts == AV_NOPTS_VALUE || packet->pts < packet->dts)
+            packet->pts = packet->dts;
+        last_dts = packet->dts;
+        packet->stream_index = output_stream->index;
+        packet->pos = -1;
+        const int result = av_interleaved_write_frame(format, packet.get());
+        if (result < 0) {
+            set_error(error, "cannot write fragmented MP4 packet: " + ff_error(result));
+            return false;
+        }
+        wrote_packet = true;
+        return true;
+    }
+
+    bool close(std::string* error) noexcept {
+        bool success = true;
+        if (transcoder && header_written) {
+            try {
+                success = transcoder->flush(error);
+            } catch (...) {
+                success = false;
+            }
+        }
+        if (format != nullptr && header_written) {
+            const int result = av_write_trailer(format);
+            if (result < 0) {
+                success = false;
+                try {
+                    set_error(error, "cannot finalize fragmented MP4: " + ff_error(result));
+                } catch (...) {
+                }
+            }
+        }
+        if (format != nullptr)
+            avformat_free_context(format);
+        format = nullptr;
+        output_stream = nullptr;
+        if (io != nullptr) {
+            av_freep(&io->buffer);
+            avio_context_free(&io);
+        }
+        source = StreamInfo{};
+        output = {};
+        header_written = false;
+        wrote_packet = false;
+        base_dts = last_dts = AV_NOPTS_VALUE;
+        transcoder.reset();
+        return success;
+    }
+};
+
+FragmentedMp4Writer::FragmentedMp4Writer() : impl_(std::make_unique<Impl>()) {
+    configure_ffmpeg_logging();
+}
+FragmentedMp4Writer::~FragmentedMp4Writer() = default;
+FragmentedMp4Writer::FragmentedMp4Writer(FragmentedMp4Writer&&) noexcept = default;
+FragmentedMp4Writer& FragmentedMp4Writer::operator=(FragmentedMp4Writer&&) noexcept = default;
+bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOptions& options,
+                               WriteCallback output, std::string* error) {
+    impl_->close(nullptr);
+    if (!stream.valid() || !output) {
+        set_error(error, "camera stream or web output is unavailable");
+        return false;
+    }
+    const std::string codec = normalized_codec(options.codec);
+    const AVCodecID output_codec =
+        codec == "copy" ? stream.impl_->parameters->codec_id : codec_id_for_name(codec);
+    if (output_codec != AV_CODEC_ID_H264 && output_codec != AV_CODEC_ID_HEVC) {
+        set_error(error, "fragmented MP4 webstream requires H.264 or HEVC output");
+        return false;
+    }
+    int result = avformat_alloc_output_context2(&impl_->format, nullptr, "mp4", nullptr);
+    if (result < 0 || impl_->format == nullptr) {
+        set_error(error, "cannot allocate fragmented MP4 muxer: " + ff_error(result));
+        return false;
+    }
+    auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
+    impl_->io = buffer != nullptr
+                    ? avio_alloc_context(buffer, 32768, 1, impl_.get(), nullptr,
+                                         &FragmentedMp4Writer::Impl::write_bytes, nullptr)
+                    : nullptr;
+    if (impl_->io == nullptr) {
+        set_error(error, "cannot allocate fragmented MP4 I/O");
+        impl_->close(nullptr);
+        return false;
+    }
+    impl_->format->pb = impl_->io;
+    impl_->format->flags |= AVFMT_FLAG_CUSTOM_IO | AVFMT_FLAG_FLUSH_PACKETS;
+    if (codec == "copy") {
+        impl_->output_stream = avformat_new_stream(impl_->format, nullptr);
+        result =
+            impl_->output_stream == nullptr
+                ? AVERROR(ENOMEM)
+                : avcodec_parameters_copy(impl_->output_stream->codecpar, stream.impl_->parameters);
+        if (result >= 0) {
+            impl_->output_stream->codecpar->codec_tag =
+                mp4_codec_tag(impl_->output_stream->codecpar->codec_id);
+            impl_->output_stream->time_base = stream.impl_->time_base;
+        }
+    } else {
+        impl_->transcoder = std::make_unique<PacketTranscoder>();
+        result =
+            impl_->transcoder->open(impl_->format, stream, options, error) ? 0 : AVERROR(EINVAL);
+        if (result >= 0)
+            impl_->output_stream = impl_->transcoder->output_stream;
+    }
+    if (result >= 0) {
+        impl_->output_stream->codecpar->codec_tag =
+            mp4_codec_tag(impl_->output_stream->codecpar->codec_id);
+    }
+    AVDictionary* muxer_options = nullptr;
+    av_dict_set(&muxer_options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+    impl_->output = std::move(output);
+    if (result >= 0)
+        result = avformat_write_header(impl_->format, &muxer_options);
+    av_dict_free(&muxer_options);
+    if (result < 0) {
+        if (error == nullptr || error->empty())
+            set_error(error, "cannot initialize fragmented MP4 stream: " + ff_error(result));
+        impl_->close(nullptr);
+        return false;
+    }
+    impl_->source = stream;
+    impl_->header_written = true;
+    return true;
+}
+bool FragmentedMp4Writer::write(const VideoPacket& packet, std::string* error) {
+    return impl_->write(packet, error);
+}
+bool FragmentedMp4Writer::close(std::string* error) noexcept {
+    return impl_->close(error);
+}
+bool FragmentedMp4Writer::is_open() const noexcept {
     return impl_ && impl_->format != nullptr;
 }
 
@@ -1016,9 +1588,24 @@ TimelapseWriter::TimelapseWriter(TimelapseWriter&&) noexcept = default;
 TimelapseWriter& TimelapseWriter::operator=(TimelapseWriter&&) noexcept = default;
 bool TimelapseWriter::open(const std::string& path, int width, int height, int fps,
                            std::string* error) {
+    TimelapseEncodeOptions options;
+    options.codec = "mpeg4";
+    return open(path, width, height, fps, options, error);
+}
+bool TimelapseWriter::open(const std::string& path, int width, int height, int fps,
+                           const TimelapseEncodeOptions& options, std::string* error) {
     impl_->close(nullptr);
     if (width <= 0 || height <= 0 || fps <= 0) {
         set_error(error, "invalid timelapse dimensions or frame rate");
+        return false;
+    }
+    if (options.quality < 0 || options.quality > 100 || options.bitrate < 0 ||
+        options.keyframe_interval <= 0) {
+        set_error(error, "invalid timelapse encoding options");
+        return false;
+    }
+    if (!video_encoder_available(options.codec, options.encoder)) {
+        set_error(error, "requested timelapse encoder is unavailable or cannot be opened");
         return false;
     }
     int result = avformat_alloc_output_context2(&impl_->format, nullptr, nullptr, path.c_str());
@@ -1026,12 +1613,12 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         set_error(error, "cannot select timelapse container: " + ff_error(result));
         return false;
     }
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+    const AVCodec* codec = find_requested_encoder(options.codec, options.encoder);
     impl_->stream = avformat_new_stream(impl_->format, nullptr);
     impl_->encoder.reset(codec ? avcodec_alloc_context3(codec) : nullptr);
     impl_->encoded_frame = make_frame();
     if (!codec || !impl_->stream || !impl_->encoder || !impl_->encoded_frame) {
-        set_error(error, "MPEG-4 timelapse encoder is unavailable");
+        set_error(error, "requested timelapse encoder is unavailable or has the wrong codec");
         impl_->close(nullptr);
         return false;
     }
@@ -1040,14 +1627,29 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     impl_->encoder->pix_fmt = AV_PIX_FMT_YUV420P;
     impl_->encoder->time_base = AVRational{1, fps};
     impl_->encoder->framerate = AVRational{fps, 1};
-    impl_->encoder->gop_size = std::max(fps * 10, 1);
+    impl_->encoder->gop_size = std::max(fps * options.keyframe_interval, 1);
     impl_->encoder->max_b_frames = 0;
-    impl_->encoder->bit_rate =
-        std::max<std::int64_t>(400000, static_cast<std::int64_t>(width) * height * fps / 5);
+    AVDictionary* codec_options = nullptr;
+    if (options.quality > 0 && codec->id == AV_CODEC_ID_HEVC) {
+        const std::string crf = std::to_string((100 - options.quality) * 51 / 100);
+        av_dict_set(&codec_options, "crf", crf.c_str(), 0);
+        if (std::string(codec->name) == "libx265")
+            av_dict_set(&codec_options, "x265-params", "log-level=error", 0);
+    } else if (options.quality > 0) {
+        const int quantizer = 31 - ((options.quality - 1) * 29 / 99);
+        impl_->encoder->flags |= AV_CODEC_FLAG_QSCALE;
+        impl_->encoder->global_quality = FF_QP2LAMBDA * quantizer;
+    } else if (options.bitrate > 0) {
+        impl_->encoder->bit_rate = options.bitrate;
+    } else {
+        impl_->encoder->bit_rate =
+            std::max<std::int64_t>(400000, static_cast<std::int64_t>(width) * height * fps / 5);
+    }
     if ((impl_->format->oformat->flags & AVFMT_GLOBALHEADER) != 0) {
         impl_->encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
-    result = avcodec_open2(impl_->encoder.get(), codec, nullptr);
+    result = avcodec_open2(impl_->encoder.get(), codec, &codec_options);
+    av_dict_free(&codec_options);
     if (result >= 0) {
         result = avcodec_parameters_from_context(impl_->stream->codecpar, impl_->encoder.get());
     }
@@ -1060,6 +1662,11 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         return false;
     }
     impl_->stream->time_base = impl_->encoder->time_base;
+    if (impl_->format->oformat != nullptr &&
+        (std::string(impl_->format->oformat->name).find("mp4") != std::string::npos ||
+         std::string(impl_->format->oformat->name).find("mov") != std::string::npos)) {
+        impl_->stream->codecpar->codec_tag = mp4_codec_tag(codec->id);
+    }
     if ((impl_->format->oformat->flags & AVFMT_NOFILE) == 0) {
         result = avio_open(&impl_->format->pb, path.c_str(), AVIO_FLAG_WRITE);
     }
@@ -1108,6 +1715,7 @@ bool TimelapseWriter::write(const DecodedImage& image, std::string* error) {
         return false;
     }
     impl_->encoded_frame->pts = impl_->next_pts++;
+    impl_->encoded_frame->quality = impl_->encoder->global_quality;
     const int result = avcodec_send_frame(impl_->encoder.get(), impl_->encoded_frame.get());
     if (result < 0) {
         set_error(error, "cannot submit timelapse frame: " + ff_error(result));

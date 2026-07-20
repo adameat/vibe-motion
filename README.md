@@ -151,12 +151,33 @@ systemd service remain visibly named `vibe-motion`.
   Motion 5 deployment ignores it; streaming uses the global web port.
 - Event hooks run as argv without a shell. Quoted arguments are preserved and
   metacharacters introduced by filenames cannot execute shell fragments.
-- MP4 passthrough begins from the latest buffered keyframe and rebases packet
-  timestamps. This is the most important part to validate for every camera
-  codec before production cutover.
+- MP4/MKV passthrough begins from the latest buffered keyframe and rebases
+  packet timestamps. `movie_codec copy` preserves the camera codec. A fixed
+  `movie_codec h264|hevc` decodes and re-encodes the same packet stream;
+  `movie_encoder libx265` can require x265. `movie_quality`, `movie_bitrate`,
+  and `movie_keyframe_interval` control that encoder. HEVC in MP4 is tagged
+  as `hvc1`.
 - `timelapse_container mkv` is recommended for hourly timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.
+- `timelapse_codec mpeg4|hevc` selects the encoded codec independently of the
+  container. `timelapse_encoder libx265` requests x265 explicitly; an empty
+  encoder selects libx265 first for HEVC and otherwise uses FFmpeg's default.
+  HEVC supports MKV and MP4, while the legacy `mpeg4` container means MPEG-4
+  Part 2 in AVI.
+- `timelapse_quality 1..100` enables variable-bitrate encoding; `0`
+  preserves bitrate mode. In bitrate mode, `timelapse_bitrate 0` keeps the
+  resolution-derived default and a positive value selects an explicit number
+  of bits per second. `timelapse_keyframe_interval` sets the maximum distance
+  between keyframes in output-video seconds; its default is 10.
+- `stream_codec mjpeg` keeps only the Motion-compatible MJPEG routes.
+  `stream_codec copy` enables packet-based fragmented-MP4 passthrough at
+  `/<camera>/video.mp4`. A fixed `stream_codec h264|hevc` creates one
+  transcoder per active web client, controlled by `stream_encoder`,
+  `stream_quality`, `stream_bitrate`, and `stream_keyframe_interval`. Both
+  modes reuse the existing camera connection. HEVC playback depends on
+  OS/browser codec support; Safari on Apple platforms is commonly supported,
+  while other browsers vary.
 - Detection is behavior-compatible, not pixel-identical to Motion. Thresholds
   should be tuned against representative clips before migration.
 

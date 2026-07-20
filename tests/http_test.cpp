@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <sys/socket.h>
@@ -74,7 +75,7 @@ static std::string get_headers(std::uint16_t port, const std::string& path) {
     return response;
 }
 
-int main() {
+int main(int, char** argv) {
     HttpServer server({"127.0.0.1", 0, 8, std::chrono::milliseconds(1000)},
                       [] { return "{\"ok\":true}"; });
     server.start();
@@ -104,6 +105,29 @@ int main() {
     const auto long_stream = get_headers(server.port(), "/7/mjpg/stream");
     assert(long_stream.find("200 OK") != std::string::npos);
     assert(long_stream.find("multipart/x-mixed-replace") != std::string::npos);
+
+    const auto fixture = std::filesystem::path(argv[0]).parent_path() / "media-fixture.mp4";
+    if (std::filesystem::exists(fixture)) {
+        CameraSourceConfig config;
+        config.url = fixture.string();
+        config.jpeg_quality = 0;
+        NetworkCameraSource source(config);
+        std::string error;
+        assert(source.open(&error));
+        for (;;) {
+            auto read = source.read();
+            if (read.status == CameraReadStatus::end_of_stream)
+                break;
+            if (read.status == CameraReadStatus::again)
+                continue;
+            assert(read.status == CameraReadStatus::sample && read.sample);
+            server.publish_video("7", read.sample->packet);
+        }
+        source.close();
+        const auto video = get_headers(server.port(), "/7/video.mp4");
+        assert(video.find("200 OK") != std::string::npos);
+        assert(video.find("Content-Type: video/mp4") != std::string::npos);
+    }
     server.stop();
 
     std::cout << "http tests passed\n";

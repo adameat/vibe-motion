@@ -1,10 +1,13 @@
 #pragma once
 
+#include "vibe_motion/media.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -51,8 +54,13 @@ class HttpServer {
     void
     publish(std::string camera_id, std::vector<std::uint8_t> jpeg,
             std::chrono::system_clock::time_point captured_at = std::chrono::system_clock::now());
+    // Retains a short reference-counted packet window so a fragmented-MP4
+    // client can attach at the latest keyframe without reconnecting the camera.
+    void publish_video(std::string camera_id, const VideoPacket& packet,
+                       const VideoEncodeOptions& options = {});
     PublishedJpeg latest(const std::string& camera_id) const;
     bool has_stream_clients(const std::string& camera_id) const;
+    bool has_video_stream_clients(const std::string& camera_id) const;
     bool wants_jpeg(const std::string& camera_id) const;
 
   private:
@@ -78,6 +86,13 @@ class HttpServer {
     std::unordered_map<std::string, PublishedJpeg> frames_;
     std::unordered_map<std::string, std::size_t> stream_clients_;
     std::unordered_map<std::string, std::size_t> frame_requests_;
+    struct PublishedVideoPacket {
+        VideoPacket packet;
+        std::uint64_t version = 0;
+    };
+    std::unordered_map<std::string, std::deque<PublishedVideoPacket>> video_packets_;
+    std::unordered_map<std::string, VideoEncodeOptions> video_options_;
+    std::unordered_map<std::string, std::size_t> video_stream_clients_;
     std::uint64_t next_version_ = 1;
 
     mutable std::mutex clients_mutex_;
