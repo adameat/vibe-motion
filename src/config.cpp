@@ -1,4 +1,5 @@
 #include "vibe_motion/config.hpp"
+#include "vibe_motion/media.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -249,6 +250,14 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.movie_max_time = integer(value, location, key);
     else if (key == "movie_quality")
         c.movie_quality = integer(value, location, key);
+    else if (key == "movie_codec")
+        c.movie_codec = lower(trim(value));
+    else if (key == "movie_encoder")
+        c.movie_encoder = trim(value);
+    else if (key == "movie_bitrate")
+        c.movie_bitrate = integer(value, location, key);
+    else if (key == "movie_keyframe_interval")
+        c.movie_keyframe_interval = integer(value, location, key);
     else if (key == "movie_container")
         c.movie_container = value;
     else if (key == "movie_filename")
@@ -267,6 +276,16 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.timelapse_fps = integer(value, location, key);
     else if (key == "timelapse_container")
         c.timelapse_container = value;
+    else if (key == "timelapse_codec")
+        c.timelapse_codec = lower(trim(value));
+    else if (key == "timelapse_encoder")
+        c.timelapse_encoder = trim(value);
+    else if (key == "timelapse_quality")
+        c.timelapse_quality = integer(value, location, key);
+    else if (key == "timelapse_bitrate")
+        c.timelapse_bitrate = integer(value, location, key);
+    else if (key == "timelapse_keyframe_interval")
+        c.timelapse_keyframe_interval = integer(value, location, key);
     else if (key == "locate_motion_mode")
         c.locate_motion_mode = lower(trim(value));
     else if (key == "locate_motion_style")
@@ -288,6 +307,16 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
             ": stream_port is accepted for compatibility but uses the global HTTP listener");
     } else if (key == "stream_maxrate") {
         c.stream_maxrate = integer(value, location, key);
+    } else if (key == "stream_codec" || key == "webstream_codec") {
+        c.stream_codec = lower(trim(value));
+    } else if (key == "stream_encoder" || key == "webstream_encoder") {
+        c.stream_encoder = trim(value);
+    } else if (key == "stream_quality" || key == "webstream_quality") {
+        c.stream_quality = integer(value, location, key);
+    } else if (key == "stream_bitrate" || key == "webstream_bitrate") {
+        c.stream_bitrate = integer(value, location, key);
+    } else if (key == "stream_keyframe_interval" || key == "webstream_keyframe_interval") {
+        c.stream_keyframe_interval = integer(value, location, key);
     } else
         return ApplyResult::unknown;
     return ApplyResult::applied;
@@ -495,6 +524,10 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "movie_duplicate_frames " << bool_text(c.movie_duplicate_frames) << '\n'
         << "movie_max_time " << c.movie_max_time << '\n'
         << "movie_quality " << c.movie_quality << '\n'
+        << "movie_codec " << c.movie_codec << '\n'
+        << "movie_encoder " << c.movie_encoder << '\n'
+        << "movie_bitrate " << c.movie_bitrate << '\n'
+        << "movie_keyframe_interval " << c.movie_keyframe_interval << '\n'
         << "movie_container " << c.movie_container << '\n'
         << "movie_filename " << c.movie_filename << '\n'
         << "snapshot_interval " << c.snapshot_interval << '\n'
@@ -504,6 +537,11 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "timelapse_filename " << c.timelapse_filename << '\n'
         << "timelapse_fps " << c.timelapse_fps << '\n'
         << "timelapse_container " << c.timelapse_container << '\n'
+        << "timelapse_codec " << c.timelapse_codec << '\n'
+        << "timelapse_encoder " << c.timelapse_encoder << '\n'
+        << "timelapse_quality " << c.timelapse_quality << '\n'
+        << "timelapse_bitrate " << c.timelapse_bitrate << '\n'
+        << "timelapse_keyframe_interval " << c.timelapse_keyframe_interval << '\n'
         << "locate_motion_mode " << c.locate_motion_mode << '\n'
         << "locate_motion_style " << c.locate_motion_style << '\n'
         << "on_event_start " << c.on_event_start << '\n'
@@ -512,7 +550,12 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "on_movie_start " << c.on_movie_start << '\n'
         << "on_movie_end " << c.on_movie_end << '\n'
         << "stream_port " << c.stream_port << '\n'
-        << "stream_maxrate " << c.stream_maxrate << '\n';
+        << "stream_maxrate " << c.stream_maxrate << '\n'
+        << "stream_codec " << c.stream_codec << '\n'
+        << "stream_encoder " << c.stream_encoder << '\n'
+        << "stream_quality " << c.stream_quality << '\n'
+        << "stream_bitrate " << c.stream_bitrate << '\n'
+        << "stream_keyframe_interval " << c.stream_keyframe_interval << '\n';
     dump_unknown(out, c.unknown_options, redact);
 }
 
@@ -552,7 +595,10 @@ std::string timelapse_file_extension(std::string container) {
     if (container == "mpeg4") {
         return ".avi";
     }
-    throw ConfigError("timelapse_container must be mkv or mpeg4");
+    if (container == "mp4") {
+        return ".mp4";
+    }
+    throw ConfigError("timelapse_container must be mkv, mp4, or mpeg4");
 }
 
 ConfigParser::ConfigParser(ParseOptions options) : options_(options) {}
@@ -627,10 +673,23 @@ void Config::validate() const {
                     "capture and event intervals cannot be negative");
         check_range(c.movie_quality >= 0 && c.movie_quality <= 100, c,
                     "movie_quality must be between 0 and 100");
+        check_range(c.movie_codec == "copy" || c.movie_codec == "passthrough" ||
+                        c.movie_codec == "h264" || c.movie_codec == "hevc" ||
+                        c.movie_codec == "h265",
+                    c, "movie_codec must be copy, passthrough, h264, hevc, or h265");
+        check_range(c.movie_bitrate >= 0 && c.movie_bitrate <= 1000000000, c,
+                    "movie_bitrate must be between 0 and 1000000000");
+        check_range(c.movie_keyframe_interval > 0 && c.movie_keyframe_interval <= 86400, c,
+                    "movie_keyframe_interval must be between 1 and 86400");
         check_range(!c.picture_output || c.picture_output_mode == "best", c,
                     "only picture_output off/best is implemented");
-        check_range(!c.movie_output || c.movie_passthrough, c,
-                    "movie_output currently requires movie_passthrough on");
+        check_range(!c.movie_output ||
+                        (c.movie_codec != "copy" && c.movie_codec != "passthrough") ||
+                        c.movie_passthrough,
+                    c, "movie_codec copy/passthrough requires movie_passthrough on");
+        check_range(!c.movie_output || c.movie_codec == "copy" || c.movie_codec == "passthrough" ||
+                        video_encoder_available(c.movie_codec, c.movie_encoder),
+                    c, "requested movie encoder is unavailable or has the wrong codec");
         check_range(c.movie_max_time == 0, c, "movie_max_time rollover is not implemented; use 0");
         check_range(c.movie_container == "mp4" || c.movie_container == "mkv", c,
                     "movie_container must be mp4 or mkv");
@@ -638,14 +697,44 @@ void Config::validate() const {
                     c, "output intervals cannot be negative");
         check_range(c.timelapse_fps > 0 && c.timelapse_fps <= 240, c,
                     "timelapse_fps must be between 1 and 240");
+        check_range(c.timelapse_quality >= 0 && c.timelapse_quality <= 100, c,
+                    "timelapse_quality must be between 0 and 100");
+        check_range(c.timelapse_bitrate >= 0 && c.timelapse_bitrate <= 1000000000, c,
+                    "timelapse_bitrate must be between 0 and 1000000000");
+        check_range(c.timelapse_keyframe_interval > 0 && c.timelapse_keyframe_interval <= 86400, c,
+                    "timelapse_keyframe_interval must be between 1 and 86400");
         check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
                     "only hourly timelapse_mode is implemented");
         const std::string timelapse_container = lower(trim(c.timelapse_container));
         check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
-                        timelapse_container == "mpeg4",
-                    c, "timelapse_container must be mkv or mpeg4");
+                        timelapse_container == "mpeg4" || timelapse_container == "mp4",
+                    c, "timelapse_container must be mkv, mp4, or mpeg4");
+        const std::string timelapse_codec = normalize_video_codec(trim(c.timelapse_codec));
+        check_range(
+            timelapse_codec == "mpeg4" || timelapse_codec == "h264" || timelapse_codec == "hevc", c,
+            "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
+        check_range(timelapse_codec == "mpeg4" || timelapse_container != "mpeg4", c,
+                    "H.264/HEVC timelapse requires the mkv or mp4 container");
+        std::string selected_encoder;
+        check_range(
+            c.timelapse_interval == 0 ||
+                video_encoder_available(c.timelapse_codec, c.timelapse_encoder, &selected_encoder),
+            c, "requested timelapse encoder is unavailable or has the wrong codec");
         check_range(c.stream_port >= 0 && c.stream_port <= 65535, c, "invalid stream_port");
         check_range(c.stream_maxrate > 0, c, "stream_maxrate must be positive");
+        check_range(c.stream_codec == "mjpeg" || c.stream_codec == "copy" ||
+                        c.stream_codec == "h264" || c.stream_codec == "hevc" ||
+                        c.stream_codec == "h265",
+                    c, "stream_codec must be mjpeg, copy, h264, hevc, or h265");
+        check_range(c.stream_quality >= 0 && c.stream_quality <= 100, c,
+                    "stream_quality must be between 0 and 100");
+        check_range(c.stream_bitrate >= 0 && c.stream_bitrate <= 1000000000, c,
+                    "stream_bitrate must be between 0 and 1000000000");
+        check_range(c.stream_keyframe_interval > 0 && c.stream_keyframe_interval <= 86400, c,
+                    "stream_keyframe_interval must be between 1 and 86400");
+        check_range(c.stream_codec == "mjpeg" || c.stream_codec == "copy" ||
+                        video_encoder_available(c.stream_codec, c.stream_encoder),
+                    c, "requested stream encoder is unavailable or has the wrong codec");
     }
 }
 

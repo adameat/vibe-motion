@@ -20,11 +20,23 @@ template <typename Function> void expect_config_error(Function function) {
     assert(thrown);
 }
 
+template <typename Function>
+void expect_config_error_message(Function function, const std::string& expected) {
+    try {
+        function();
+    } catch (const ConfigError& error) {
+        assert(std::string(error.what()).find(expected) != std::string::npos);
+        return;
+    }
+    assert(false);
+}
+
 } // namespace
 
 int main() {
     assert(timelapse_file_extension("mkv") == ".mkv");
     assert(timelapse_file_extension(" MPEG4 ") == ".avi");
+    assert(timelapse_file_extension("mp4") == ".mp4");
     expect_config_error([] { timelapse_file_extension("mpg"); });
 
     const auto fixtures = std::filesystem::path(__FILE__).parent_path() / "fixtures";
@@ -66,6 +78,17 @@ int main() {
     assert(deployment.global.camera_defaults.threshold_tune);
     assert(deployment.global.camera_defaults.noise_tune);
     assert(deployment.global.camera_defaults.movie_all_frames);
+    assert(deployment.global.camera_defaults.movie_codec == "copy");
+    assert(deployment.global.camera_defaults.movie_bitrate == 750000);
+    assert(deployment.global.camera_defaults.movie_keyframe_interval == 5);
+    assert(deployment.global.camera_defaults.timelapse_codec == "mpeg4");
+    assert(deployment.global.camera_defaults.stream_codec == "copy");
+    assert(deployment.global.camera_defaults.stream_quality == 65);
+    assert(deployment.global.camera_defaults.stream_bitrate == 500000);
+    assert(deployment.global.camera_defaults.stream_keyframe_interval == 2);
+    assert(deployment.global.camera_defaults.timelapse_quality == 72);
+    assert(deployment.global.camera_defaults.timelapse_bitrate == 600000);
+    assert(deployment.global.camera_defaults.timelapse_keyframe_interval == 30);
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
 
@@ -152,6 +175,17 @@ int main() {
     assert(noise_dump.find("noise_tune off") != std::string::npos);
     assert(noise_dump.find("movie_all_frames off") != std::string::npos);
 
+    const std::string deployment_dump = deployment.dump_effective();
+    assert(deployment_dump.find("timelapse_quality 72") != std::string::npos);
+    assert(deployment_dump.find("timelapse_bitrate 600000") != std::string::npos);
+    assert(deployment_dump.find("timelapse_keyframe_interval 30") != std::string::npos);
+    assert(deployment_dump.find("movie_codec copy") != std::string::npos);
+    assert(deployment_dump.find("movie_bitrate 750000") != std::string::npos);
+    assert(deployment_dump.find("movie_keyframe_interval 5") != std::string::npos);
+    assert(deployment_dump.find("stream_codec copy") != std::string::npos);
+    assert(deployment_dump.find("stream_quality 65") != std::string::npos);
+    assert(deployment_dump.find("stream_bitrate 500000") != std::string::npos);
+
     expect_config_error([] { ConfigParser().parse_string("daemon maybe\n"); });
     expect_config_error([&] { load_config(fixtures / "invalid-main.conf"); });
     expect_config_error(
@@ -180,6 +214,75 @@ int main() {
     expect_config_error([&] {
         Config invalid = onvif;
         invalid.cameras.front().decode_frames = "sometimes";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_quality = 101;
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_bitrate = -1;
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_keyframe_interval = 0;
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_codec = "hevc";
+        invalid.cameras.front().timelapse_container = "mpeg4";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().movie_codec = "hevc";
+        invalid.cameras.front().movie_encoder = "definitely-not-an-encoder";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().stream_codec = "hevc";
+        invalid.cameras.front().stream_encoder = "definitely-not-an-encoder";
+        invalid.validate();
+    });
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().movie_codec = "invalid";
+            invalid.validate();
+        },
+        "movie_codec must be copy, passthrough, h264, hevc, or h265");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().movie_codec = "passthrough";
+            invalid.cameras.front().movie_passthrough = false;
+            invalid.validate();
+        },
+        "movie_codec copy/passthrough requires movie_passthrough on");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().stream_codec = "invalid";
+            invalid.validate();
+        },
+        "stream_codec must be mjpeg, copy, h264, hevc, or h265");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().timelapse_codec = "invalid";
+            invalid.validate();
+        },
+        "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_codec = "hevc";
+        invalid.cameras.front().timelapse_container = "mkv";
+        invalid.cameras.front().timelapse_encoder = "definitely-not-an-encoder";
         invalid.validate();
     });
 

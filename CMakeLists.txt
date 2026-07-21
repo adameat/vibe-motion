@@ -150,6 +150,7 @@ if(VIBE_BUILD_TESTS)
       -f lavfi -i testsrc2=size=160x120:rate=10 -t 3 -c:v libx264 -g 10 -pix_fmt yuv420p
       "${CMAKE_CURRENT_BINARY_DIR}/media-fixture.mp4")
     set_tests_properties(media PROPERTIES DEPENDS media_fixture)
+    set_tests_properties(http PROPERTIES DEPENDS media_fixture)
   endif()
 endif()
 include(CTest)

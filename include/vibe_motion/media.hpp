@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -36,6 +37,9 @@ class StreamInfo {
     explicit StreamInfo(std::shared_ptr<Impl> impl);
     friend class NetworkCameraSource;
     friend class EventMovieWriter;
+    friend class FragmentedMp4Writer;
+    friend class TimelapseWriter;
+    friend struct PacketTranscoder;
     friend class VideoPacket;
 };
 
@@ -63,6 +67,9 @@ class VideoPacket {
     explicit VideoPacket(std::unique_ptr<Impl> impl);
     friend class NetworkCameraSource;
     friend class EventMovieWriter;
+    friend class FragmentedMp4Writer;
+    friend class TimelapseWriter;
+    friend struct PacketTranscoder;
 };
 
 // A reference-counted decoded color frame. Copies retain the underlying frame
@@ -174,7 +181,54 @@ class EventMovieWriter {
     EventMovieWriter& operator=(EventMovieWriter&&) noexcept;
 
     bool open(const std::string& path, const StreamInfo& stream, std::string* error = nullptr);
+    bool open(const std::string& path, const StreamInfo& stream,
+              const struct VideoEncodeOptions& options, std::string* error = nullptr);
     bool write_preroll(const PacketRing& ring, std::string* error = nullptr);
+    bool write(const VideoPacket& packet, std::string* error = nullptr);
+    bool close(std::string* error = nullptr) noexcept;
+    bool is_open() const noexcept;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+struct VideoEncodeOptions {
+    // A positive quality enables variable-bitrate encoding. Zero uses the
+    // explicit bitrate, or the resolution-derived default when bitrate is zero.
+    int quality = 0;
+    int bitrate = 0;
+    // copy preserves input packets; a codec family requests transcoding.
+    std::string codec = "copy";
+    std::string encoder;
+    // Maximum distance between keyframes, measured in output-video seconds.
+    int keyframe_interval = 10;
+    // Web streaming favors bounded latency over encoder efficiency.
+    bool low_latency = false;
+    // Emit a separate fragmented-MP4 fragment for every encoded packet.
+    bool fragment_every_frame = false;
+};
+
+using TimelapseEncodeOptions = VideoEncodeOptions;
+
+std::string normalize_video_codec(std::string codec);
+
+bool video_encoder_available(const std::string& codec, const std::string& encoder = {},
+                             std::string* selected_encoder = nullptr);
+
+class FragmentedMp4Writer {
+  public:
+    using WriteCallback = std::function<bool(const std::uint8_t*, std::size_t)>;
+
+    FragmentedMp4Writer();
+    ~FragmentedMp4Writer();
+    FragmentedMp4Writer(const FragmentedMp4Writer&) = delete;
+    FragmentedMp4Writer& operator=(const FragmentedMp4Writer&) = delete;
+    FragmentedMp4Writer(FragmentedMp4Writer&&) noexcept;
+    FragmentedMp4Writer& operator=(FragmentedMp4Writer&&) noexcept;
+
+    bool open(const StreamInfo& stream, const VideoEncodeOptions& options, WriteCallback output,
+              std::string* error = nullptr);
     bool write(const VideoPacket& packet, std::string* error = nullptr);
     bool close(std::string* error = nullptr) noexcept;
     bool is_open() const noexcept;
@@ -186,6 +240,8 @@ class EventMovieWriter {
 
 class TimelapseWriter {
   public:
+    using PacketCallback = std::function<void(const VideoPacket&)>;
+
     TimelapseWriter();
     ~TimelapseWriter();
     TimelapseWriter(const TimelapseWriter&) = delete;
@@ -196,7 +252,12 @@ class TimelapseWriter {
     // The caller chooses the path and therefore controls hourly rotation.
     bool open(const std::string& path, int width, int height, int fps,
               std::string* error = nullptr);
+    bool open(const std::string& path, int width, int height, int fps,
+              const TimelapseEncodeOptions& options, std::string* error = nullptr);
     bool write(const DecodedImage& image, std::string* error = nullptr);
+    // Mirrors packets already produced by the timelapse encoder; it does not
+    // create another encoder or camera connection.
+    void set_packet_callback(PacketCallback callback);
     bool close(std::string* error = nullptr) noexcept;
     bool is_open() const noexcept;
 
