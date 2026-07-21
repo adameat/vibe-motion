@@ -28,6 +28,22 @@ extern "C" {
 #include <utility>
 
 namespace vibe_motion {
+
+std::string normalize_video_codec(std::string codec) {
+    std::transform(codec.begin(), codec.end(), codec.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    if (codec == "h265" || codec == "x265" || codec == "libx265") {
+        return "hevc";
+    }
+    if (codec == "x264" || codec == "libx264") {
+        return "h264";
+    }
+    if (codec == "passthrough") {
+        return "copy";
+    }
+    return codec;
+}
+
 namespace {
 
 void configure_ffmpeg_logging() noexcept {
@@ -94,23 +110,8 @@ PacketPtr make_packet() {
     return PacketPtr(av_packet_alloc());
 }
 
-std::string normalized_codec(std::string codec) {
-    std::transform(codec.begin(), codec.end(), codec.begin(),
-                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (codec == "h265" || codec == "x265" || codec == "libx265") {
-        return "hevc";
-    }
-    if (codec == "x264" || codec == "libx264") {
-        return "h264";
-    }
-    if (codec == "passthrough") {
-        return "copy";
-    }
-    return codec;
-}
-
 AVCodecID codec_id_for_name(const std::string& requested) {
-    const std::string codec = normalized_codec(requested);
+    const std::string codec = normalize_video_codec(requested);
     if (codec == "mpeg4")
         return AV_CODEC_ID_MPEG4;
     if (codec == "h264")
@@ -121,7 +122,7 @@ AVCodecID codec_id_for_name(const std::string& requested) {
 }
 
 bool codec_matches(AVCodecID actual, const std::string& requested) {
-    const std::string codec = normalized_codec(requested);
+    const std::string codec = normalize_video_codec(requested);
     return codec == "copy" || actual == codec_id_for_name(codec);
 }
 
@@ -1251,7 +1252,7 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
         set_error(error, "cannot select movie container: " + ff_error(result));
         return false;
     }
-    const std::string codec = normalized_codec(options.codec);
+    const std::string codec = normalize_video_codec(options.codec);
     const AVCodecID output_codec =
         codec == "copy" ? stream.impl_->parameters->codec_id : codec_id_for_name(codec);
     if (output_codec == AV_CODEC_ID_NONE) {
@@ -1466,7 +1467,7 @@ bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOption
         set_error(error, "camera stream or web output is unavailable");
         return false;
     }
-    const std::string codec = normalized_codec(options.codec);
+    const std::string codec = normalize_video_codec(options.codec);
     const AVCodecID output_codec =
         codec == "copy" ? stream.impl_->parameters->codec_id : codec_id_for_name(codec);
     if (output_codec != AV_CODEC_ID_H264 && output_codec != AV_CODEC_ID_HEVC) {

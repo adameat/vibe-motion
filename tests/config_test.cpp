@@ -271,6 +271,13 @@ int main() {
             invalid.validate();
         },
         "stream_codec must be mjpeg, copy, h264, hevc, or h265");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().timelapse_codec = "invalid";
+            invalid.validate();
+        },
+        "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
     expect_config_error([&] {
         Config invalid = deployment;
         invalid.cameras.front().timelapse_codec = "hevc";

@@ -709,12 +709,10 @@ void Config::validate() const {
         check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
                         timelapse_container == "mpeg4" || timelapse_container == "mp4",
                     c, "timelapse_container must be mkv, mp4, or mpeg4");
-        const std::string timelapse_codec = lower(trim(c.timelapse_codec));
-        check_range(timelapse_codec == "mpeg4" || timelapse_codec == "h264" ||
-                        timelapse_codec == "x264" || timelapse_codec == "libx264" ||
-                        timelapse_codec == "hevc" || timelapse_codec == "h265" ||
-                        timelapse_codec == "x265" || timelapse_codec == "libx265",
-                    c, "timelapse_codec must be mpeg4, h264, or hevc");
+        const std::string timelapse_codec = normalize_video_codec(trim(c.timelapse_codec));
+        check_range(
+            timelapse_codec == "mpeg4" || timelapse_codec == "h264" || timelapse_codec == "hevc", c,
+            "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
         check_range(timelapse_codec == "mpeg4" || timelapse_container != "mpeg4", c,
                     "H.264/HEVC timelapse requires the mkv or mp4 container");
         std::string selected_encoder;

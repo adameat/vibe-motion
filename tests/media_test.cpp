@@ -368,6 +368,10 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
 
 int main(int, char** argv) {
     test_decoded_frame_quality();
+    assert(normalize_video_codec("H265") == "hevc");
+    assert(normalize_video_codec("libx264") == "h264");
+    assert(normalize_video_codec("passthrough") == "copy");
+    assert(normalize_video_codec("mpeg4") == "mpeg4");
     const auto directory = std::filesystem::path(argv[0]).parent_path();
     const auto input = directory / "media-fixture.mp4";
     if (!std::filesystem::exists(input)) {

@@ -262,18 +262,6 @@ struct WorkerStatus {
     std::string error;
 };
 
-std::string normalized_output_codec(std::string codec) {
-    std::transform(codec.begin(), codec.end(), codec.begin(),
-                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    if (codec == "h265" || codec == "x265" || codec == "libx265")
-        return "hevc";
-    if (codec == "x264" || codec == "libx264")
-        return "h264";
-    if (codec == "passthrough")
-        return "copy";
-    return codec;
-}
-
 FrameDecodeMode idle_decode_mode(const CameraConfig& config) {
     if (config.decode_frames == "keyframes" ||
         (config.decode_frames == "auto" && config.onvif_events && !config.motion_detection)) {
@@ -743,19 +731,19 @@ class CameraWorker {
                 state.connected = true;
                 state.error.clear();
                 state.input_codec = input_codec;
-                state.movie_codec = normalized_output_codec(config_.movie_codec) == "copy"
+                state.movie_codec = normalize_video_codec(config_.movie_codec) == "copy"
                                         ? input_codec
-                                        : normalized_output_codec(config_.movie_codec);
-                state.timelapse_codec = normalized_output_codec(config_.timelapse_codec);
+                                        : normalize_video_codec(config_.movie_codec);
+                state.timelapse_codec = normalize_video_codec(config_.timelapse_codec);
                 state.stream_codec = config_.stream_codec == "mjpeg"
                                          ? "mjpeg"
-                                         : (normalized_output_codec(config_.stream_codec) == "copy"
+                                         : (normalize_video_codec(config_.stream_codec) == "copy"
                                                 ? input_codec
-                                                : normalized_output_codec(config_.stream_codec));
+                                                : normalize_video_codec(config_.stream_codec));
                 state.movie_error.clear();
                 state.timelapse_error.clear();
                 state.stream_error.clear();
-                if (normalized_output_codec(config_.stream_codec) == "copy" &&
+                if (normalize_video_codec(config_.stream_codec) == "copy" &&
                     input_codec != "h264" && input_codec != "hevc") {
                     state.stream_error =
                         "fragmented MP4 passthrough requires H.264 or HEVC camera input";
