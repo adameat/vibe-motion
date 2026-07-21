@@ -486,14 +486,17 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         }
         FragmentedMp4Writer writer;
         std::string error;
-        std::vector<std::uint8_t> initialization;
-        bool initialized = false;
+        struct StreamOutputState {
+            std::vector<std::uint8_t> initialization;
+            bool initialized = false;
+        };
+        const auto output_state = std::make_shared<StreamOutputState>();
         if (!writer.open(
                 initial.front().packet.stream(), encode_options,
-                [this, fd = client->fd, &initialization, &initialized](const std::uint8_t* bytes,
-                                                                       std::size_t size) {
-                    if (!initialized) {
-                        initialization.insert(initialization.end(), bytes, bytes + size);
+                [this, fd = client->fd, output_state](const std::uint8_t* bytes, std::size_t size) {
+                    if (!output_state->initialized) {
+                        output_state->initialization.insert(output_state->initialization.end(),
+                                                            bytes, bytes + size);
                         return true;
                     }
                     return send_all(fd, bytes, size);
@@ -506,9 +509,10 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
             "Connection: close\r\n\r\n";
         if (!send_all(client->fd, headers.data(), headers.size()) ||
-            !send_all(client->fd, initialization.data(), initialization.size()))
+            !send_all(client->fd, output_state->initialization.data(),
+                      output_state->initialization.size()))
             return;
-        initialized = true;
+        output_state->initialized = true;
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             ++video_stream_clients_[camera];

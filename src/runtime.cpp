@@ -267,6 +267,8 @@ std::string normalized_output_codec(std::string codec) {
                    [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
     if (codec == "h265" || codec == "x265" || codec == "libx265")
         return "hevc";
+    if (codec == "x264" || codec == "libx264")
+        return "h264";
     if (codec == "passthrough")
         return "copy";
     return codec;

@@ -9,13 +9,16 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -147,6 +150,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         std::filesystem::path(__FILE__).parent_path() / "fixtures" / "media-hevc-fixture.mp4";
     assert(std::filesystem::exists(input));
     const bool has_hevc_encoder = video_encoder_available("hevc");
+    const bool has_h264_encoder = video_encoder_available("h264", "libx264");
     assert(!video_encoder_available("hevc", "libx264"));
 
     CameraSourceConfig config;
@@ -164,11 +168,13 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     const auto transcoded_event_path = directory / "media-hevc-transcoded-event.mp4";
     const auto transcoded_fragmented_path = directory / "media-hevc-transcoded-fragmented.mp4";
     const auto timelapse_path = directory / "media-hevc-timelapse.mkv";
+    const auto h264_timelapse_path = directory / "media-h264-timelapse.mkv";
     std::filesystem::remove(event_path);
     std::filesystem::remove(fragmented_path);
     std::filesystem::remove(transcoded_event_path);
     std::filesystem::remove(transcoded_fragmented_path);
     std::filesystem::remove(timelapse_path);
+    std::filesystem::remove(h264_timelapse_path);
 
     PacketRing ring(std::chrono::seconds(10), 1000);
     EventMovieWriter event;
@@ -298,6 +304,58 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     assert(timelapse_stats.codec == "hevc");
     assert(timelapse_stats.frames == static_cast<int>(images.size()));
     assert(timelapse_stats.has_color);
+
+    if (has_h264_encoder) {
+        TimelapseWriter h264_timelapse;
+        const TimelapseEncodeOptions h264_options{
+            .quality = 55,
+            .bitrate = 0,
+            .codec = "h264",
+            .encoder = "libx264",
+            .keyframe_interval = 2,
+        };
+        assert(
+            h264_timelapse.open(h264_timelapse_path.string(), 160, 120, 1, h264_options, &error));
+        for (const auto& image : images)
+            assert(h264_timelapse.write(image, &error));
+        assert(h264_timelapse.close(&error));
+        const auto h264_stats = decoded_video_stats(h264_timelapse_path);
+        assert(h264_stats.codec == "h264");
+        assert(h264_stats.frames == static_cast<int>(images.size()));
+        assert(h264_stats.keyframes >= 2);
+        assert(h264_stats.has_color);
+
+        if (std::getenv("VIBE_X264_STRESS") != nullptr) {
+            auto stress_options = h264_options;
+            stress_options.keyframe_interval = 300;
+            constexpr std::array<std::pair<int, int>, 7> dimensions{{
+                {3840, 2160},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+            }};
+            std::vector<std::unique_ptr<TimelapseWriter>> writers;
+            for (std::size_t index = 0; index < dimensions.size(); ++index) {
+                const auto path =
+                    directory / ("media-x264-stress-" + std::to_string(index) + ".mkv");
+                std::filesystem::remove(path);
+                auto writer = std::make_unique<TimelapseWriter>();
+                assert(writer->open(path.string(), dimensions[index].first,
+                                    dimensions[index].second, 1, stress_options, &error));
+                writers.push_back(std::move(writer));
+            }
+            for (int frame = 0; frame < 320; ++frame) {
+                for (auto& writer : writers)
+                    assert(writer->write(images[static_cast<std::size_t>(frame) % images.size()],
+                                         &error));
+            }
+            for (auto& writer : writers)
+                assert(writer->close(&error));
+        }
+    }
 }
 
 int main(int, char** argv) {

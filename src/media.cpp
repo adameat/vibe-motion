@@ -100,6 +100,9 @@ std::string normalized_codec(std::string codec) {
     if (codec == "h265" || codec == "x265" || codec == "libx265") {
         return "hevc";
     }
+    if (codec == "x264" || codec == "libx264") {
+        return "h264";
+    }
     if (codec == "passthrough") {
         return "copy";
     }
@@ -133,6 +136,8 @@ const AVCodec* find_requested_encoder(const std::string& codec_name,
         codec = avcodec_find_encoder_by_name(encoder_name.c_str());
     } else if (codec_id == AV_CODEC_ID_HEVC) {
         codec = avcodec_find_encoder_by_name("libx265");
+    } else if (codec_id == AV_CODEC_ID_H264) {
+        codec = avcodec_find_encoder_by_name("libx264");
     }
     if (codec == nullptr && encoder_name.empty()) {
         codec = avcodec_find_encoder(codec_id);
@@ -927,6 +932,7 @@ struct PacketTranscoder {
         encoder->framerate = frame_rate;
         const double fps = av_q2d(frame_rate);
         encoder->gop_size = std::max(1, static_cast<int>(fps * options.keyframe_interval + 0.5));
+        encoder->keyint_min = encoder->gop_size;
         encoder->max_b_frames = 0;
         AVDictionary* encoder_options = nullptr;
         if (options.quality > 0) {
@@ -1628,9 +1634,21 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     impl_->encoder->time_base = AVRational{1, fps};
     impl_->encoder->framerate = AVRational{fps, 1};
     impl_->encoder->gop_size = std::max(fps * options.keyframe_interval, 1);
+    impl_->encoder->keyint_min = impl_->encoder->gop_size;
     impl_->encoder->max_b_frames = 0;
     AVDictionary* codec_options = nullptr;
-    if (options.quality > 0 && codec->id == AV_CODEC_ID_HEVC) {
+    if (std::string(codec->name) == "libx264") {
+        // One hourly encoder remains open per camera. Bound x264's otherwise
+        // large 4K frame-thread/lookahead queues before the first packet.
+        impl_->encoder->thread_count = 1;
+        av_dict_set(&codec_options, "preset", "veryfast", 0);
+        av_dict_set(&codec_options, "tune", "zerolatency", 0);
+        av_dict_set(&codec_options, "x264-params",
+                    "threads=1:lookahead-threads=1:sync-lookahead=0:rc-lookahead=0:ref=1:"
+                    "bframes=0:scenecut=0",
+                    0);
+    }
+    if (options.quality > 0 && (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC)) {
         const std::string crf = std::to_string((100 - options.quality) * 51 / 100);
         av_dict_set(&codec_options, "crf", crf.c_str(), 0);
         if (std::string(codec->name) == "libx265")

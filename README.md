@@ -160,11 +160,11 @@ systemd service remain visibly named `vibe-motion`.
 - `timelapse_container mkv` is recommended for hourly timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.
-- `timelapse_codec mpeg4|hevc` selects the encoded codec independently of the
-  container. `timelapse_encoder libx265` requests x265 explicitly; an empty
-  encoder selects libx265 first for HEVC and otherwise uses FFmpeg's default.
-  HEVC supports MKV and MP4, while the legacy `mpeg4` container means MPEG-4
-  Part 2 in AVI.
+- `timelapse_codec mpeg4|h264|hevc` selects the encoded codec independently of
+  the container. `timelapse_encoder libx264|libx265` requests a software
+  encoder explicitly; an empty encoder prefers the matching x264/x265
+  implementation. H.264 and HEVC support MKV and MP4, while the legacy
+  `mpeg4` container means MPEG-4 Part 2 in AVI.
 - `timelapse_quality 1..100` enables variable-bitrate encoding; `0`
   preserves bitrate mode. In bitrate mode, `timelapse_bitrate 0` keeps the
   resolution-derived default and a positive value selects an explicit number
