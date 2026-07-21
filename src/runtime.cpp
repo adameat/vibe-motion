@@ -726,8 +726,13 @@ class CameraWorker {
             auto reported_requested_mode = decode_controller.requested_mode();
             auto reported_active_mode = decode_controller.active_mode();
             std::optional<std::chrono::steady_clock::time_point> last_keyframe_at;
+            const std::string input_codec = source.stream_info().codec_name();
+            const std::string normalized_stream_codec = normalize_video_codec(config_.stream_codec);
+            const bool stream_passthrough_supported =
+                normalized_stream_codec != "copy" || input_codec == "h264" || input_codec == "hevc";
+            const bool publish_video_packets =
+                http_ != nullptr && config_.stream_codec != "mjpeg" && stream_passthrough_supported;
             set_status([&](WorkerStatus& state) {
-                const std::string input_codec = source.stream_info().codec_name();
                 state.connected = true;
                 state.error.clear();
                 state.input_codec = input_codec;
@@ -735,16 +740,15 @@ class CameraWorker {
                                         ? input_codec
                                         : normalize_video_codec(config_.movie_codec);
                 state.timelapse_codec = normalize_video_codec(config_.timelapse_codec);
-                state.stream_codec = config_.stream_codec == "mjpeg"
-                                         ? "mjpeg"
-                                         : (normalize_video_codec(config_.stream_codec) == "copy"
-                                                ? input_codec
-                                                : normalize_video_codec(config_.stream_codec));
+                state.stream_codec =
+                    config_.stream_codec == "mjpeg"
+                        ? "mjpeg"
+                        : (normalized_stream_codec == "copy" ? input_codec
+                                                             : normalized_stream_codec);
                 state.movie_error.clear();
                 state.timelapse_error.clear();
                 state.stream_error.clear();
-                if (normalize_video_codec(config_.stream_codec) == "copy" &&
-                    input_codec != "h264" && input_codec != "hevc") {
+                if (!stream_passthrough_supported) {
                     state.stream_error =
                         "fragmented MP4 passthrough requires H.264 or HEVC camera input";
                 }
@@ -811,9 +815,7 @@ class CameraWorker {
 
                 auto& sample = *read.sample;
                 ring.push(sample.packet);
-                const auto output_state = status();
-                if (http_ != nullptr && config_.stream_codec != "mjpeg" &&
-                    output_state.stream_error.empty() && sample.packet.valid()) {
+                if (publish_video_packets && sample.packet.valid()) {
                     const VideoEncodeOptions stream_options{
                         .quality = config_.stream_quality,
                         .bitrate = config_.stream_bitrate,
