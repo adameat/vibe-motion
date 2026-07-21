@@ -13,7 +13,7 @@ is included or copied.
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
 | Event lifecycle | local and/or ONVIF PullPoint motion triggers, `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, best event JPEG |
 | Files | `%` expansion, snapshots, MP4 passthrough movies, hourly MKV/AVI MPEG-4 timelapse, automatic parent directories |
-| Hooks | event start/end, picture save, movie start/end; asynchronous argv execution and exit logging |
+| Hooks | event start/end, picture save, movie start/end; bounded asynchronous argv execution, snapshot coalescing, event priority, timeout/forced kill, supervisor recovery, health counters |
 | HTTP | one global listener, read-only status, latest JPEG, per-camera multipart MJPEG |
 | Operations | foreground/systemd operation, structured logs, signal shutdown, HUP reload, per-camera failure isolation |
 

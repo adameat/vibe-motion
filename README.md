@@ -53,7 +53,10 @@ successfully. Network URLs are redacted from logs and config dumps.
 
 The web listener serves a small status page and JSON status plus Motion-style
 MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
-Motion web control actions and database features are out of scope.
+Motion web control actions and database features are out of scope. The JSON
+includes shared hook-executor health and counters (`pending`, `running`,
+`submitted`, `completed`, `timed_out`, `failed`, `dropped`, `coalesced`,
+`backpressure`, and supervisor restart/error state).
 
 ## ONVIF cameras
 
@@ -140,8 +143,10 @@ The intended deployment sequence is:
    daemons against the same output filenames during validation.
 
 Hook child supervisors set their Linux process name to `motion` for compatibility
-with integrations that inspect parent process names. The daemon executable and
-systemd service remain visibly named `vibe-motion`.
+with integrations that inspect parent process names. They are started with
+`posix_spawn`, monitored, and automatically replaced after an exit or response
+timeout without restarting camera workers. The daemon executable and systemd
+service remain visibly named `vibe-motion`.
 
 ## Compatibility notes
 
@@ -151,6 +156,9 @@ systemd service remain visibly named `vibe-motion`.
   Motion 5 deployment ignores it; streaming uses the global web port.
 - Event hooks run as argv without a shell. Quoted arguments are preserved and
   metacharacters introduced by filenames cannot execute shell fragments.
+- Pending periodic snapshot hooks are coalesced per camera. Event lifecycle and
+  movie completion hooks have priority and may evict a superseded snapshot when
+  the bounded queue is full.
 - MP4 passthrough begins from the latest buffered keyframe and rebases packet
   timestamps. This is the most important part to validate for every camera
   codec before production cutover.

@@ -32,6 +32,21 @@ struct HookExecutorOptions {
     std::chrono::milliseconds timeout{300000};
     std::chrono::milliseconds terminate_grace{2000};
     std::string child_comm = "motion";
+    std::string supervisor_program = "/proc/self/exe";
+    std::chrono::milliseconds restart_delay{250};
+    int supervisor_socket_buffer = 0;
+    std::chrono::milliseconds supervisor_response_timeout{5000};
+};
+
+enum class HookPriority { normal, critical };
+
+struct HookSubmitOptions {
+    HookPriority priority = HookPriority::normal;
+    std::string kind = "hook";
+    int camera_id = 0;
+    // Pending work with the same key is replaced by the newest submission.
+    // Running jobs are never replaced.
+    std::string coalesce_key;
 };
 
 struct HookResult {
@@ -44,6 +59,27 @@ struct HookResult {
 };
 
 using HookCompletion = std::function<void(const HookResult&)>;
+
+struct HookExecutorStatus {
+    std::size_t pending = 0;
+    std::size_t running = 0;
+    std::size_t max_pending = 0;
+    std::size_t max_concurrent = 0;
+    std::uint64_t submitted = 0;
+    std::uint64_t completed = 0;
+    std::uint64_t timed_out = 0;
+    std::uint64_t failed = 0;
+    std::uint64_t dropped = 0;
+    std::uint64_t coalesced = 0;
+    std::uint64_t backpressure = 0;
+    std::uint64_t supervisor_restarts = 0;
+    bool supervisor_healthy = false;
+    int supervisor_pid = -1;
+    int last_error = 0;
+};
+
+// Internal entry point used by the exec-spawned supervisor process.
+int run_hook_supervisor(int socket, const std::string& process_name);
 
 class HookExecutor {
   public:
@@ -62,15 +98,19 @@ class HookExecutor {
     // Use this overload when a richer Motion/strftime expander is needed: parse
     // first, expand each argument independently, then submit the resulting argv.
     bool submit(std::vector<std::string> argv, HookCompletion completion = {});
+    bool submit(std::vector<std::string> argv, HookSubmitOptions options,
+                HookCompletion completion = {});
     bool wait_idle(std::chrono::milliseconds timeout);
     void stop();
 
     std::size_t pending() const;
     std::size_t running() const;
+    HookExecutorStatus status() const;
 
   private:
     struct Job {
         std::vector<std::string> argv;
+        HookSubmitOptions options;
         HookCompletion completion;
     };
     struct Child {
@@ -84,6 +124,7 @@ class HookExecutor {
     };
 
     void run();
+    bool start_supervisor();
     // Returns false when the supervisor socket applies backpressure; the caller
     // keeps the job queued and retries after a short wait.
     bool launch(Job& job);
@@ -93,11 +134,17 @@ class HookExecutor {
     void fail_supervisor(int error);
     void reap_supervisor_nonblocking() noexcept;
     void stop_supervisor() noexcept;
+    std::size_t pending_unlocked() const noexcept;
+    Job pop_next_job();
+    bool coalesce_pending(Job& replacement);
+    bool evict_coalescible_job();
+    void complete_job(Job job, int error);
 
     HookExecutorOptions options_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::condition_variable idle_;
+    std::deque<Job> critical_jobs_;
     std::deque<Job> jobs_;
     std::vector<Child> children_;
     std::deque<std::pair<HookCompletion, HookResult>> completions_;
@@ -106,6 +153,16 @@ class HookExecutor {
     pid_t supervisor_pid_ = -1;
     std::uint64_t next_job_id_ = 1;
     bool supervisor_failed_ = false;
+    std::chrono::steady_clock::time_point restart_after_{};
+    std::uint64_t submitted_ = 0;
+    std::uint64_t completed_ = 0;
+    std::uint64_t timed_out_ = 0;
+    std::uint64_t failed_ = 0;
+    std::uint64_t dropped_ = 0;
+    std::uint64_t coalesced_ = 0;
+    std::uint64_t backpressure_ = 0;
+    std::uint64_t supervisor_restarts_ = 0;
+    int last_error_ = 0;
     std::thread worker_;
 };
 
