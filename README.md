@@ -56,7 +56,9 @@ MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
 Motion web control actions and database features are out of scope. The
 `/<camera>/timelapse.mp4` route mirrors packets from the active timelapse
 encoder without another camera connection or encode; a new client waits for
-the next timelapse keyframe before receiving media packets.
+the next timelapse keyframe before receiving media packets. This route requires
+`timelapse_codec h264` or `timelapse_codec hevc`; MPEG-4 Part 2 timelapses cannot
+be served in this fragmented MP4 stream and the route returns HTTP 503.
 
 ## ONVIF cameras
 

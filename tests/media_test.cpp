@@ -243,6 +243,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     else if (video_encoder_available("h264"))
         transcode_codec = "h264";
     if (!transcode_codec.empty()) {
+        const auto preroll = ring.snapshot_from_latest_keyframe();
         const VideoEncodeOptions transcode_options{
             .quality = 60,
             .bitrate = 0,
@@ -251,26 +252,25 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .keyframe_interval = 1,
         };
         EventMovieWriter transcoded_event;
-        assert(transcoded_event.open(transcoded_event_path.string(),
-                                     ring.snapshot_from_latest_keyframe().front().stream(),
+        assert(transcoded_event.open(transcoded_event_path.string(), preroll.front().stream(),
                                      transcode_options, &error));
         assert(transcoded_event.write_preroll(ring, &error));
         assert(transcoded_event.close(&error));
         const auto transcoded_event_stats = decoded_video_stats(transcoded_event_path);
         assert(transcoded_event_stats.codec == transcode_codec);
-        assert(transcoded_event_stats.frames > 0);
+        assert(transcoded_event_stats.frames == static_cast<int>(preroll.size()));
 
         std::vector<std::uint8_t> transcoded_fragmented_bytes;
         FragmentedMp4Writer transcoded_fragmented;
         assert(transcoded_fragmented.open(
-            ring.snapshot_from_latest_keyframe().front().stream(), transcode_options,
+            preroll.front().stream(), transcode_options,
             [&](const std::uint8_t* bytes, std::size_t size) {
                 transcoded_fragmented_bytes.insert(transcoded_fragmented_bytes.end(), bytes,
                                                    bytes + size);
                 return true;
             },
             &error));
-        for (const auto& packet : ring.snapshot_from_latest_keyframe())
+        for (const auto& packet : preroll)
             assert(transcoded_fragmented.write(packet, &error));
         assert(transcoded_fragmented.close(&error));
         std::ofstream transcoded_fragmented_file(transcoded_fragmented_path, std::ios::binary);
@@ -280,7 +280,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         transcoded_fragmented_file.close();
         const auto transcoded_fragmented_stats = decoded_video_stats(transcoded_fragmented_path);
         assert(transcoded_fragmented_stats.codec == transcode_codec);
-        assert(transcoded_fragmented_stats.frames > 0);
+        assert(transcoded_fragmented_stats.frames == static_cast<int>(preroll.size()));
     }
 
     TimelapseWriter timelapse;

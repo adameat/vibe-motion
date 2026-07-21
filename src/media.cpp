@@ -1077,16 +1077,40 @@ struct PacketTranscoder {
     bool flush(std::string* error) {
         if (flushed)
             return true;
-        flushed = true;
-        int result = avcodec_send_packet(decoder.get(), nullptr);
-        if (result >= 0 && !receive_frames(error))
-            return false;
-        result = avcodec_send_frame(encoder.get(), nullptr);
-        if (result < 0 && result != AVERROR_EOF) {
-            set_error(error, "cannot flush transcode encoder: " + ff_error(result));
-            return false;
+
+        for (;;) {
+            const int result = avcodec_send_packet(decoder.get(), nullptr);
+            if (result == AVERROR(EAGAIN)) {
+                if (!receive_frames(error))
+                    return false;
+                continue;
+            }
+            if (result < 0 && result != AVERROR_EOF) {
+                set_error(error, "cannot flush transcode decoder: " + ff_error(result));
+                return false;
+            }
+            break;
         }
-        return write_encoded_packets(error);
+        if (!receive_frames(error))
+            return false;
+
+        for (;;) {
+            const int result = avcodec_send_frame(encoder.get(), nullptr);
+            if (result == AVERROR(EAGAIN)) {
+                if (!write_encoded_packets(error))
+                    return false;
+                continue;
+            }
+            if (result < 0 && result != AVERROR_EOF) {
+                set_error(error, "cannot flush transcode encoder: " + ff_error(result));
+                return false;
+            }
+            break;
+        }
+        if (!write_encoded_packets(error))
+            return false;
+        flushed = true;
+        return true;
     }
 };
 
