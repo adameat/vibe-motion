@@ -339,7 +339,8 @@ bool HookExecutor::start_supervisor() {
         }
     }
 
-    constexpr int child_socket = 198;
+    // Keep the inherited descriptor below even restrictive RLIMIT_NOFILE values.
+    constexpr int child_socket = 3;
     posix_spawn_file_actions_t actions;
     int spawn_error = ::posix_spawn_file_actions_init(&actions);
     const bool actions_initialized = spawn_error == 0;

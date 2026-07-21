@@ -83,8 +83,8 @@ int run_hook_supervisor(int socket, const std::string& process_name);
 
 class HookExecutor {
   public:
-    // Construct while the process is single-threaded. The persistent hook
-    // supervisor is initialized directly in the forked child.
+    // The persistent hook supervisor is exec-spawned, so construction is safe
+    // after other application threads have started.
     explicit HookExecutor(HookExecutorOptions options = {});
     ~HookExecutor();
 

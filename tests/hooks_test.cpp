@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -246,6 +247,23 @@ void test_construction_with_other_threads(const std::filesystem::path& superviso
     other.join();
 }
 
+void test_construction_with_low_fd_limit(const std::filesystem::path& supervisor) {
+    rlimit original_limit{};
+    assert(::getrlimit(RLIMIT_NOFILE, &original_limit) == 0);
+    rlimit limited = original_limit;
+    limited.rlim_cur = original_limit.rlim_max == RLIM_INFINITY || original_limit.rlim_max >= 64
+                           ? 64
+                           : original_limit.rlim_max;
+    assert(limited.rlim_cur > 3);
+    assert(::setrlimit(RLIMIT_NOFILE, &limited) == 0);
+    {
+        HookExecutor executor(options(supervisor, 1, 4));
+        assert(executor.submit(std::vector<std::string>{"/bin/true"}));
+        assert(executor.wait_idle(5s));
+    }
+    assert(::setrlimit(RLIMIT_NOFILE, &original_limit) == 0);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -264,6 +282,7 @@ int main(int argc, char** argv) {
     test_socket_backpressure_recovers(supervisor);
     test_clean_shutdown(supervisor);
     test_construction_with_other_threads(supervisor);
+    test_construction_with_low_fd_limit(supervisor);
 
     std::cout << "hook tests passed\n";
 }

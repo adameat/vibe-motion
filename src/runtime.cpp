@@ -27,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
@@ -76,6 +77,10 @@ std::string json_escape(const std::string& value) {
         }
     }
     return output.str();
+}
+
+std::string error_message(int error) {
+    return error == 0 ? std::string{} : std::error_code(error, std::generic_category()).message();
 }
 
 void append_json_map(std::ostringstream& output, const std::map<std::string, std::string>& values) {
@@ -1104,9 +1109,7 @@ class Application::Impl {
                << ",\"supervisor_healthy\":" << (hook_status.supervisor_healthy ? "true" : "false")
                << ",\"supervisor_restarts\":" << hook_status.supervisor_restarts
                << ",\"last_error\":" << hook_status.last_error << ",\"last_error_text\":\""
-               << json_escape(hook_status.last_error == 0 ? std::string{}
-                                                          : std::strerror(hook_status.last_error))
-               << "\"},\"cameras\":[";
+               << json_escape(error_message(hook_status.last_error)) << "\"},\"cameras\":[";
         bool first = true;
         for (const auto& worker : workers_) {
             const auto state = worker->status();
