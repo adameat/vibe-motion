@@ -482,10 +482,18 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         PublishedVideoPacket seed;
         {
             std::unique_lock<std::mutex> lock(frames_mutex_);
-            frames_changed_.wait(
-                lock, [&] { return !running_.load() || timelapse_packets_.contains(camera); });
+            const bool packet_available =
+                frames_changed_.wait_for(lock, options_.write_timeout, [&] {
+                    return !running_.load() || timelapse_packets_.contains(camera);
+                });
             if (!running_.load())
                 return;
+            if (!packet_available) {
+                lock.unlock();
+                (void)send_text(client->fd, 503, "Service Unavailable", "text/plain",
+                                "No timelapse packet is available\n");
+                return;
+            }
             seed = timelapse_packets_.at(camera);
         }
 

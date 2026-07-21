@@ -134,6 +134,9 @@ int main(int, char** argv) {
     assert(long_stream.find("multipart/x-mixed-replace") != std::string::npos);
     const auto misleading_hevc_alias = get(server.port(), "/7/hevc.mp4");
     assert(misleading_hevc_alias.find("404 Not Found") != std::string::npos);
+    const auto missing_timelapse = get(server.port(), "/missing/timelapse.mp4");
+    assert(missing_timelapse.find("503 Service Unavailable") != std::string::npos);
+    assert(missing_timelapse.find("No timelapse packet is available") != std::string::npos);
 
     const auto fixture = std::filesystem::path(argv[0]).parent_path() / "media-fixture.mp4";
     if (std::filesystem::exists(fixture)) {
