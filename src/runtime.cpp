@@ -233,6 +233,13 @@ struct WorkerStatus {
     std::string decode_requested = "all";
     std::string decode_active = "all";
     std::int64_t keyframe_interval_ms = 0;
+    std::string input_codec;
+    std::string movie_codec;
+    std::string timelapse_codec;
+    std::string stream_codec;
+    std::string movie_error;
+    std::string timelapse_error;
+    std::string stream_error;
     bool onvif_events_connected = false;
     bool onvif_motion = false;
     std::uint64_t onvif_event_count = 0;
@@ -323,6 +330,9 @@ class CameraWorker {
         const auto idle_mode = idle_decode_mode(config_);
         status_.decode_requested = std::string(frame_decode_mode_name(idle_mode));
         status_.decode_active = status_.decode_requested;
+        status_.movie_codec = config_.movie_codec;
+        status_.timelapse_codec = config_.timelapse_codec;
+        status_.stream_codec = config_.stream_codec;
     }
 
     ~CameraWorker() {
@@ -544,6 +554,7 @@ class CameraWorker {
             values.file_type = "movie";
             hook(config_.on_movie_end, values, end_when);
             if (!error.empty()) {
+                set_status([&](WorkerStatus& state) { state.movie_error = redact_secrets(error); });
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": movie finalize: ", redact_secrets(error));
             }
@@ -615,6 +626,10 @@ class CameraWorker {
         const bool dynamic_full_decode = config_.decode_frames == "auto" &&
                                          configured_idle_decode_mode == FrameDecodeMode::keyframes;
         const std::string camera_key = std::to_string(config_.camera_id);
+        timelapse.set_packet_callback([this, camera_key](const VideoPacket& packet) {
+            if (http_ != nullptr)
+                http_->publish_timelapse_video(camera_key, packet);
+        });
 
         while (!stopping_.load()) {
             std::string media_url = config_.netcam_url;
@@ -711,9 +726,32 @@ class CameraWorker {
             auto reported_requested_mode = decode_controller.requested_mode();
             auto reported_active_mode = decode_controller.active_mode();
             std::optional<std::chrono::steady_clock::time_point> last_keyframe_at;
+            const std::string input_codec = source.stream_info().codec_name();
+            const std::string normalized_stream_codec = normalize_video_codec(config_.stream_codec);
+            const bool stream_passthrough_supported =
+                normalized_stream_codec != "copy" || input_codec == "h264" || input_codec == "hevc";
+            const bool publish_video_packets =
+                http_ != nullptr && config_.stream_codec != "mjpeg" && stream_passthrough_supported;
             set_status([&](WorkerStatus& state) {
                 state.connected = true;
                 state.error.clear();
+                state.input_codec = input_codec;
+                state.movie_codec = normalize_video_codec(config_.movie_codec) == "copy"
+                                        ? input_codec
+                                        : normalize_video_codec(config_.movie_codec);
+                state.timelapse_codec = normalize_video_codec(config_.timelapse_codec);
+                state.stream_codec =
+                    config_.stream_codec == "mjpeg"
+                        ? "mjpeg"
+                        : (normalized_stream_codec == "copy" ? input_codec
+                                                             : normalized_stream_codec);
+                state.movie_error.clear();
+                state.timelapse_error.clear();
+                state.stream_error.clear();
+                if (!stream_passthrough_supported) {
+                    state.stream_error =
+                        "fragmented MP4 passthrough requires H.264 or HEVC camera input";
+                }
                 state.decode_requested =
                     std::string(frame_decode_mode_name(decode_controller.requested_mode()));
                 state.decode_active =
@@ -777,6 +815,17 @@ class CameraWorker {
 
                 auto& sample = *read.sample;
                 ring.push(sample.packet);
+                if (publish_video_packets && sample.packet.valid()) {
+                    const VideoEncodeOptions stream_options{
+                        .quality = config_.stream_quality,
+                        .bitrate = config_.stream_bitrate,
+                        .codec = config_.stream_codec,
+                        .encoder = config_.stream_encoder,
+                        .keyframe_interval = config_.stream_keyframe_interval,
+                        .low_latency = true,
+                    };
+                    http_->publish_video(camera_key, sample.packet, stream_options);
+                }
                 if (sample.decoded_keyframe) {
                     const auto now = std::chrono::steady_clock::now();
                     if (last_keyframe_at) {
@@ -793,6 +842,9 @@ class CameraWorker {
                     if (movie.is_open() && record_live) {
                         std::string error;
                         if (!movie.write(sample.packet, &error)) {
+                            set_status([&](WorkerStatus& state) {
+                                state.movie_error = redact_secrets(error);
+                            });
                             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                      ": movie write: ", redact_secrets(error));
                         }
@@ -845,6 +897,9 @@ class CameraWorker {
                 if (movie.is_open() && !decision.event_started && record_frame) {
                     std::string error;
                     if (!movie.write(sample.packet, &error)) {
+                        set_status([&](WorkerStatus& state) {
+                            state.movie_error = redact_secrets(error);
+                        });
                         Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                  ": movie write: ", redact_secrets(error));
                     }
@@ -885,7 +940,16 @@ class CameraWorker {
                                                  values, event_when);
                         std::filesystem::create_directories(movie_path.parent_path());
                         std::string error;
-                        if (movie.open(movie_path.string(), source.stream_info(), &error)) {
+                        const VideoEncodeOptions movie_options{
+                            .quality = config_.movie_quality,
+                            .bitrate = config_.movie_bitrate,
+                            .codec = config_.movie_codec,
+                            .encoder = config_.movie_encoder,
+                            .keyframe_interval = config_.movie_keyframe_interval,
+                        };
+                        if (movie.open(movie_path.string(), source.stream_info(), movie_options,
+                                       &error)) {
+                            set_status([](WorkerStatus& state) { state.movie_error.clear(); });
                             values.filename = movie_path.string();
                             values.file_type = "movie";
                             if (!movie.write_preroll(ring, &error)) {
@@ -895,6 +959,9 @@ class CameraWorker {
                             }
                             hook(config_.on_movie_start, values, event_when);
                         } else {
+                            set_status([&](WorkerStatus& state) {
+                                state.movie_error = redact_secrets(error);
+                            });
                             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                                      ": movie open: ", redact_secrets(error));
                             std::error_code ignored;
@@ -942,11 +1009,24 @@ class CameraWorker {
                                             timelapse_file_extension(config_.timelapse_container),
                                             values, frame.captured_at);
                             std::filesystem::create_directories(path.parent_path());
+                            const TimelapseEncodeOptions encode_options{
+                                .quality = config_.timelapse_quality,
+                                .bitrate = config_.timelapse_bitrate,
+                                .codec = config_.timelapse_codec,
+                                .encoder = config_.timelapse_encoder,
+                                .keyframe_interval = config_.timelapse_keyframe_interval,
+                            };
                             if (!timelapse.open(path.string(), frame.width, frame.height,
-                                                config_.timelapse_fps, &error)) {
+                                                config_.timelapse_fps, encode_options, &error)) {
+                                set_status([&](WorkerStatus& state) {
+                                    state.timelapse_error = redact_secrets(error);
+                                });
                                 Logger::instance().write(
                                     LogLevel::error, "camera ", config_.camera_id,
                                     ": timelapse open: ", redact_secrets(error));
+                            } else {
+                                set_status(
+                                    [](WorkerStatus& state) { state.timelapse_error.clear(); });
                             }
                         }
                         std::string error;
@@ -1105,6 +1185,13 @@ class Application::Impl {
                    << ",\"decode_requested\":\"" << json_escape(state.decode_requested) << "\""
                    << ",\"decode_active\":\"" << json_escape(state.decode_active) << "\""
                    << ",\"keyframe_interval_ms\":" << state.keyframe_interval_ms
+                   << ",\"input_codec\":\"" << json_escape(state.input_codec) << "\""
+                   << ",\"movie_codec\":\"" << json_escape(state.movie_codec) << "\""
+                   << ",\"timelapse_codec\":\"" << json_escape(state.timelapse_codec) << "\""
+                   << ",\"stream_codec\":\"" << json_escape(state.stream_codec) << "\""
+                   << ",\"movie_error\":\"" << json_escape(state.movie_error) << "\""
+                   << ",\"timelapse_error\":\"" << json_escape(state.timelapse_error) << "\""
+                   << ",\"stream_error\":\"" << json_escape(state.stream_error) << "\""
                    << ",\"onvif_profile\":\"" << json_escape(state.onvif_profile) << "\""
                    << ",\"onvif_profile_name\":\"" << json_escape(state.onvif_profile_name)
                    << "\",\"onvif_profile_width\":" << state.onvif_profile_width

@@ -9,13 +9,16 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,7 +33,11 @@ static void test_decoded_frame_quality() {
     assert(!detail::decoded_frame_usable(&frame));
     frame.flags = AV_FRAME_FLAG_DISCARD;
     assert(!detail::decoded_frame_usable(&frame));
+#ifdef AV_FRAME_FLAG_KEY
     frame.flags = AV_FRAME_FLAG_KEY;
+#else
+    frame.flags = 0;
+#endif
     assert(detail::decoded_frame_usable(&frame));
 
     frame.decode_error_flags = FF_DECODE_ERROR_INVALID_BITSTREAM;
@@ -45,7 +52,10 @@ static void test_decoded_frame_quality() {
 
 struct DecodedVideoStats {
     int frames = 0;
+    int keyframes = 0;
     bool has_color = false;
+    std::string codec;
+    std::string codec_tag;
 };
 
 static bool frame_has_color(const AVFrame* frame) {
@@ -111,8 +121,15 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
     AVFrame* frame = av_frame_alloc();
     assert(packet != nullptr && frame != nullptr);
     DecodedVideoStats stats;
+    stats.codec = avcodec_get_name(stream->codecpar->codec_id);
+    if (stream->codecpar->codec_tag != 0) {
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+            stats.codec_tag.push_back(
+                static_cast<char>((stream->codecpar->codec_tag >> shift) & 0xffU));
+    }
     while (av_read_frame(format, packet) >= 0) {
         if (packet->stream_index == video_stream) {
+            stats.keyframes += (packet->flags & AV_PKT_FLAG_KEY) != 0 ? 1 : 0;
             assert(avcodec_send_packet(decoder, packet) >= 0);
             receive_frames(decoder, frame, stats);
         }
@@ -128,8 +145,233 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
     return stats;
 }
 
+static void test_hevc_outputs(const std::filesystem::path& directory) {
+    const auto input =
+        std::filesystem::path(__FILE__).parent_path() / "fixtures" / "media-hevc-fixture.mp4";
+    assert(std::filesystem::exists(input));
+    const bool has_hevc_encoder = video_encoder_available("hevc");
+    const bool has_h264_encoder = video_encoder_available("h264", "libx264");
+    assert(!video_encoder_available("hevc", "libx264"));
+
+    CameraSourceConfig config;
+    config.url = input.string();
+    config.width = 160;
+    config.height = 120;
+    config.jpeg_quality = 80;
+    NetworkCameraSource source(config);
+    std::string error;
+    assert(source.open(&error));
+    assert(source.stream_info().codec_name() == "hevc");
+
+    const auto event_path = directory / "media-hevc-event.mp4";
+    const auto fragmented_path = directory / "media-hevc-fragmented.mp4";
+    const auto transcoded_event_path = directory / "media-hevc-transcoded-event.mp4";
+    const auto transcoded_fragmented_path = directory / "media-hevc-transcoded-fragmented.mp4";
+    const auto timelapse_path = directory / "media-hevc-timelapse.mkv";
+    const auto h264_timelapse_path = directory / "media-h264-timelapse.mkv";
+    std::filesystem::remove(event_path);
+    std::filesystem::remove(fragmented_path);
+    std::filesystem::remove(transcoded_event_path);
+    std::filesystem::remove(transcoded_fragmented_path);
+    std::filesystem::remove(timelapse_path);
+    std::filesystem::remove(h264_timelapse_path);
+
+    PacketRing ring(std::chrono::seconds(10), 1000);
+    EventMovieWriter event;
+    FragmentedMp4Writer fragmented;
+    const VideoEncodeOptions copy_options{};
+    std::vector<std::uint8_t> fragmented_bytes;
+    assert(fragmented.open(
+        source.stream_info(), copy_options,
+        [&](const std::uint8_t* bytes, std::size_t size) {
+            fragmented_bytes.insert(fragmented_bytes.end(), bytes, bytes + size);
+            return true;
+        },
+        &error));
+    std::vector<DecodedImage> images;
+    int packets = 0;
+    for (;;) {
+        auto read = source.read();
+        if (read.status == CameraReadStatus::end_of_stream)
+            break;
+        if (read.status == CameraReadStatus::again)
+            continue;
+        assert(read.status == CameraReadStatus::sample && read.sample);
+        auto& sample = *read.sample;
+        if (sample.packet.valid()) {
+            ring.push(sample.packet);
+            assert(fragmented.write(sample.packet, &error));
+            ++packets;
+            if (packets == 15) {
+                assert(event.open(event_path.string(), source.stream_info(), copy_options, &error));
+                assert(event.write_preroll(ring, &error));
+            } else if (event.is_open()) {
+                assert(event.write(sample.packet, &error));
+            }
+        }
+        if (sample.image && images.empty()) {
+            const auto jpeg = source.render_jpeg(*sample.image);
+            assert(jpeg.size() > 4 && jpeg[0] == 0xff && jpeg[1] == 0xd8);
+        }
+        if (sample.image && images.size() < 5)
+            images.push_back(*sample.image);
+    }
+    assert(packets >= 25);
+    assert(event.close(&error));
+    assert(fragmented.close(&error));
+    source.close();
+
+    std::ofstream fragmented_file(fragmented_path, std::ios::binary);
+    fragmented_file.write(reinterpret_cast<const char*>(fragmented_bytes.data()),
+                          static_cast<std::streamsize>(fragmented_bytes.size()));
+    fragmented_file.close();
+    assert(fragmented_file.good());
+
+    const auto event_stats = decoded_video_stats(event_path);
+    assert(event_stats.codec == "hevc");
+    assert(event_stats.codec_tag == "hvc1");
+    assert(event_stats.frames >= 15);
+    assert(event_stats.keyframes >= 1);
+    const auto fragmented_stats = decoded_video_stats(fragmented_path);
+    assert(fragmented_stats.codec == "hevc");
+    assert(fragmented_stats.codec_tag == "hvc1");
+    assert(fragmented_stats.frames == packets);
+
+    std::string transcode_codec;
+    if (has_hevc_encoder)
+        transcode_codec = "hevc";
+    else if (video_encoder_available("h264"))
+        transcode_codec = "h264";
+    if (!transcode_codec.empty()) {
+        const auto preroll = ring.snapshot_from_latest_keyframe();
+        const VideoEncodeOptions transcode_options{
+            .quality = 60,
+            .bitrate = 0,
+            .codec = transcode_codec,
+            .encoder = {},
+            .keyframe_interval = 1,
+        };
+        EventMovieWriter transcoded_event;
+        assert(transcoded_event.open(transcoded_event_path.string(), preroll.front().stream(),
+                                     transcode_options, &error));
+        assert(transcoded_event.write_preroll(ring, &error));
+        assert(transcoded_event.close(&error));
+        const auto transcoded_event_stats = decoded_video_stats(transcoded_event_path);
+        assert(transcoded_event_stats.codec == transcode_codec);
+        assert(transcoded_event_stats.frames == static_cast<int>(preroll.size()));
+
+        std::vector<std::uint8_t> transcoded_fragmented_bytes;
+        FragmentedMp4Writer transcoded_fragmented;
+        assert(transcoded_fragmented.open(
+            preroll.front().stream(), transcode_options,
+            [&](const std::uint8_t* bytes, std::size_t size) {
+                transcoded_fragmented_bytes.insert(transcoded_fragmented_bytes.end(), bytes,
+                                                   bytes + size);
+                return true;
+            },
+            &error));
+        for (const auto& packet : preroll)
+            assert(transcoded_fragmented.write(packet, &error));
+        assert(transcoded_fragmented.close(&error));
+        std::ofstream transcoded_fragmented_file(transcoded_fragmented_path, std::ios::binary);
+        transcoded_fragmented_file.write(
+            reinterpret_cast<const char*>(transcoded_fragmented_bytes.data()),
+            static_cast<std::streamsize>(transcoded_fragmented_bytes.size()));
+        transcoded_fragmented_file.close();
+        const auto transcoded_fragmented_stats = decoded_video_stats(transcoded_fragmented_path);
+        assert(transcoded_fragmented_stats.codec == transcode_codec);
+        assert(transcoded_fragmented_stats.frames == static_cast<int>(preroll.size()));
+    }
+
+    TimelapseWriter timelapse;
+    const TimelapseEncodeOptions options{
+        .quality = 60,
+        .bitrate = 0,
+        .codec = "hevc",
+        .encoder = {},
+        .keyframe_interval = 2,
+    };
+    if (!has_hevc_encoder) {
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+        assert(error.find("unavailable") != std::string::npos);
+        return;
+    }
+    assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+    for (const auto& image : images)
+        assert(timelapse.write(image, &error));
+    assert(timelapse.close(&error));
+    const auto timelapse_stats = decoded_video_stats(timelapse_path);
+    assert(timelapse_stats.codec == "hevc");
+    assert(timelapse_stats.frames == static_cast<int>(images.size()));
+    assert(timelapse_stats.has_color);
+
+    if (has_h264_encoder) {
+        TimelapseWriter h264_timelapse;
+        std::vector<VideoPacket> h264_packets;
+        h264_timelapse.set_packet_callback(
+            [&](const VideoPacket& packet) { h264_packets.push_back(packet); });
+        const TimelapseEncodeOptions h264_options{
+            .quality = 55,
+            .bitrate = 0,
+            .codec = "h264",
+            .encoder = "libx264",
+            .keyframe_interval = 2,
+        };
+        assert(
+            h264_timelapse.open(h264_timelapse_path.string(), 160, 120, 1, h264_options, &error));
+        for (const auto& image : images)
+            assert(h264_timelapse.write(image, &error));
+        assert(h264_timelapse.close(&error));
+        const auto h264_stats = decoded_video_stats(h264_timelapse_path);
+        assert(h264_stats.codec == "h264");
+        assert(h264_stats.frames == static_cast<int>(images.size()));
+        assert(h264_stats.keyframes >= 2);
+        assert(h264_stats.has_color);
+        assert(h264_packets.size() == images.size());
+        assert(h264_packets.front().stream().codec_name() == "h264");
+        assert(h264_packets.front().keyframe());
+        assert(std::count_if(h264_packets.begin(), h264_packets.end(),
+                             [](const VideoPacket& packet) { return packet.keyframe(); }) >= 2);
+
+        if (std::getenv("VIBE_X264_STRESS") != nullptr) {
+            auto stress_options = h264_options;
+            stress_options.keyframe_interval = 300;
+            constexpr std::array<std::pair<int, int>, 7> dimensions{{
+                {3840, 2160},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+                {2560, 1920},
+            }};
+            std::vector<std::unique_ptr<TimelapseWriter>> writers;
+            for (std::size_t index = 0; index < dimensions.size(); ++index) {
+                const auto path =
+                    directory / ("media-x264-stress-" + std::to_string(index) + ".mkv");
+                std::filesystem::remove(path);
+                auto writer = std::make_unique<TimelapseWriter>();
+                assert(writer->open(path.string(), dimensions[index].first,
+                                    dimensions[index].second, 1, stress_options, &error));
+                writers.push_back(std::move(writer));
+            }
+            for (int frame = 0; frame < 320; ++frame) {
+                for (auto& writer : writers)
+                    assert(writer->write(images[static_cast<std::size_t>(frame) % images.size()],
+                                         &error));
+            }
+            for (auto& writer : writers)
+                assert(writer->close(&error));
+        }
+    }
+}
+
 int main(int, char** argv) {
     test_decoded_frame_quality();
+    assert(normalize_video_codec("H265") == "hevc");
+    assert(normalize_video_codec("libx264") == "h264");
+    assert(normalize_video_codec("passthrough") == "copy");
+    assert(normalize_video_codec("mpeg4") == "mpeg4");
     const auto directory = std::filesystem::path(argv[0]).parent_path();
     const auto input = directory / "media-fixture.mp4";
     if (!std::filesystem::exists(input)) {
@@ -207,7 +449,14 @@ int main(int, char** argv) {
         const auto timelapse_path = directory / ("media-timelapse" + extension);
         std::filesystem::remove(timelapse_path);
         TimelapseWriter timelapse;
-        assert(timelapse.open(timelapse_path.string(), 160, 120, 1, &error));
+        const TimelapseEncodeOptions options{
+            .quality = 75,
+            .bitrate = 0,
+            .codec = "mpeg4",
+            .encoder = {},
+            .keyframe_interval = 2,
+        };
+        assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {
             assert(timelapse.write(images[index], &error));
         }
@@ -215,9 +464,12 @@ int main(int, char** argv) {
         assert(std::filesystem::file_size(timelapse_path) > 1000);
         const auto stats = decoded_video_stats(timelapse_path);
         assert(stats.frames == static_cast<int>(timelapse_frames));
+        assert(stats.keyframes >= 2);
         assert(stats.has_color);
     }
     source.close();
+
+    test_hevc_outputs(directory);
 
     config.analysis_framerate = 2;
     NetworkCameraSource throttled(config);

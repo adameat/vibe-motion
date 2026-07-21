@@ -66,6 +66,10 @@ struct CameraConfig {
     bool movie_duplicate_frames = false;
     int movie_max_time = 0;
     int movie_quality = 75;
+    std::string movie_codec = "copy";
+    std::string movie_encoder;
+    int movie_bitrate = 0;
+    int movie_keyframe_interval = 10;
     std::string movie_container = "mkv";
     std::string movie_filename = "%v-%Y%m%d%H%M%S";
 
@@ -76,6 +80,11 @@ struct CameraConfig {
     std::string timelapse_filename = "%Y%m%d-timelapse";
     int timelapse_fps = 30;
     std::string timelapse_container = "mkv";
+    std::string timelapse_codec = "mpeg4";
+    std::string timelapse_encoder;
+    int timelapse_quality = 0;
+    int timelapse_bitrate = 0;
+    int timelapse_keyframe_interval = 10;
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 
@@ -89,6 +98,11 @@ struct CameraConfig {
     // compatibility and emits a warning; streaming is served by the main HTTP listener.
     int stream_port = 0;
     int stream_maxrate = 1;
+    std::string stream_codec = "mjpeg";
+    std::string stream_encoder;
+    int stream_quality = 60;
+    int stream_bitrate = 0;
+    int stream_keyframe_interval = 2;
 
     std::filesystem::path source_path;
     OptionMap unknown_options;

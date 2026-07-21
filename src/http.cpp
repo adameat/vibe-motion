@@ -191,6 +191,35 @@ void HttpServer::publish(std::string camera_id, std::vector<std::uint8_t> jpeg,
     frames_changed_.notify_all();
 }
 
+void HttpServer::publish_video(std::string camera_id, const VideoPacket& packet,
+                               const VideoEncodeOptions& options) {
+    if (camera_id.empty() || !packet.valid())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        video_options_[camera_id] = options;
+        auto& packets = video_packets_[std::move(camera_id)];
+        packets.push_back({packet, next_version_++});
+        const auto newest = packet.received_at();
+        while (!packets.empty() &&
+               (packets.size() > 4096 ||
+                newest - packets.front().packet.received_at() > std::chrono::seconds(10))) {
+            packets.pop_front();
+        }
+    }
+    frames_changed_.notify_all();
+}
+
+void HttpServer::publish_timelapse_video(std::string camera_id, const VideoPacket& packet) {
+    if (camera_id.empty() || !packet.valid())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        timelapse_packets_[std::move(camera_id)] = {packet, next_version_++};
+    }
+    frames_changed_.notify_all();
+}
+
 PublishedJpeg HttpServer::latest(const std::string& camera_id) const {
     std::lock_guard<std::mutex> lock(frames_mutex_);
     const auto iterator = frames_.find(camera_id);
@@ -201,6 +230,18 @@ bool HttpServer::has_stream_clients(const std::string& camera_id) const {
     std::lock_guard<std::mutex> lock(frames_mutex_);
     const auto iterator = stream_clients_.find(camera_id);
     return iterator != stream_clients_.end() && iterator->second > 0;
+}
+
+bool HttpServer::has_video_stream_clients(const std::string& camera_id) const {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    const auto iterator = video_stream_clients_.find(camera_id);
+    return iterator != video_stream_clients_.end() && iterator->second > 0;
+}
+
+bool HttpServer::has_timelapse_stream_clients(const std::string& camera_id) const {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    const auto iterator = timelapse_stream_clients_.find(camera_id);
+    return iterator != timelapse_stream_clients_.end() && iterator->second > 0;
 }
 
 bool HttpServer::wants_jpeg(const std::string& camera_id) const {
@@ -261,6 +302,14 @@ std::string HttpServer::root_page() const {
         for (const auto& entry : frames_) {
             cameras.push_back(entry.first);
         }
+        for (const auto& entry : video_packets_) {
+            if (std::find(cameras.begin(), cameras.end(), entry.first) == cameras.end())
+                cameras.push_back(entry.first);
+        }
+        for (const auto& entry : timelapse_packets_) {
+            if (std::find(cameras.begin(), cameras.end(), entry.first) == cameras.end())
+                cameras.push_back(entry.first);
+        }
     }
     std::sort(cameras.begin(), cameras.end());
     std::ostringstream page;
@@ -269,7 +318,9 @@ std::string HttpServer::root_page() const {
     for (const auto& camera : cameras) {
         page << "<section><h2>Camera " << html_escape(camera) << "</h2><img src=\"/"
              << url_escape(camera) << "/mjpg/stream\" alt=\"Camera " << html_escape(camera)
-             << "\"></section>";
+             << "\"><p><a href=\"/" << url_escape(camera)
+             << "/video.mp4\">fragmented MP4 stream</a> · <a href=\"/" << url_escape(camera)
+             << "/timelapse.mp4\">live timelapse stream</a></p></section>";
     }
     page << "</body></html>";
     return page.str();
@@ -425,6 +476,198 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                    send_all(client->fd, frame.bytes->data(), frame.bytes->size()));
         }
         client->done.store(true);
+        return;
+    }
+    if (action == "/timelapse.mp4") {
+        PublishedVideoPacket seed;
+        {
+            std::unique_lock<std::mutex> lock(frames_mutex_);
+            const bool packet_available =
+                frames_changed_.wait_for(lock, options_.write_timeout, [&] {
+                    return !running_.load() || timelapse_packets_.contains(camera);
+                });
+            if (!running_.load())
+                return;
+            if (!packet_available) {
+                lock.unlock();
+                (void)send_text(client->fd, 503, "Service Unavailable", "text/plain",
+                                "No timelapse packet is available\n");
+                return;
+            }
+            seed = timelapse_packets_.at(camera);
+        }
+
+        FragmentedMp4Writer writer;
+        std::string error;
+        struct StreamOutputState {
+            std::vector<std::uint8_t> initialization;
+            bool initialized = false;
+        };
+        const auto output_state = std::make_shared<StreamOutputState>();
+        const VideoEncodeOptions mux_options{
+            .quality = 0,
+            .bitrate = 0,
+            .codec = "copy",
+            .encoder = {},
+            .keyframe_interval = 10,
+            .low_latency = false,
+            .fragment_every_frame = true,
+        };
+        if (!writer.open(
+                seed.packet.stream(), mux_options,
+                [this, fd = client->fd, output_state](const std::uint8_t* bytes, std::size_t size) {
+                    if (!output_state->initialized) {
+                        output_state->initialization.insert(output_state->initialization.end(),
+                                                            bytes, bytes + size);
+                        return true;
+                    }
+                    return send_all(fd, bytes, size);
+                },
+                &error)) {
+            (void)send_text(client->fd, 503, "Service Unavailable", "text/plain", error + "\n");
+            return;
+        }
+        const std::string headers =
+            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n";
+        if (!send_all(client->fd, headers.data(), headers.size()) ||
+            !send_all(client->fd, output_state->initialization.data(),
+                      output_state->initialization.size()))
+            return;
+        output_state->initialized = true;
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            ++timelapse_stream_clients_[camera];
+        }
+
+        std::uint64_t delivered = seed.version;
+        bool started = false;
+        while (running_.load() && error.empty()) {
+            PublishedVideoPacket next;
+            {
+                std::unique_lock<std::mutex> lock(frames_mutex_);
+                frames_changed_.wait(lock, [&] {
+                    const auto found = timelapse_packets_.find(camera);
+                    return !running_.load() ||
+                           (found != timelapse_packets_.end() && found->second.version > delivered);
+                });
+                if (!running_.load())
+                    break;
+                next = timelapse_packets_.at(camera);
+            }
+            delivered = next.version;
+            if (!started && !next.packet.keyframe())
+                continue;
+            if (!writer.write(next.packet, &error))
+                break;
+            started = true;
+        }
+        writer.close(nullptr);
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            const auto found = timelapse_stream_clients_.find(camera);
+            if (found != timelapse_stream_clients_.end() && --found->second == 0)
+                timelapse_stream_clients_.erase(found);
+        }
+        return;
+    }
+    if (action == "/video.mp4") {
+        std::vector<PublishedVideoPacket> initial;
+        VideoEncodeOptions encode_options;
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            const auto found = video_packets_.find(camera);
+            if (found != video_packets_.end()) {
+                if (const auto options = video_options_.find(camera);
+                    options != video_options_.end())
+                    encode_options = options->second;
+                auto begin = found->second.end();
+                for (auto iterator = found->second.end(); iterator != found->second.begin();) {
+                    --iterator;
+                    if (iterator->packet.keyframe()) {
+                        begin = iterator;
+                        break;
+                    }
+                }
+                if (begin != found->second.end())
+                    initial.assign(begin, found->second.end());
+            }
+        }
+        if (initial.empty()) {
+            (void)send_text(client->fd, 503, "Service Unavailable", "text/plain",
+                            "No decodable video keyframe is available\n");
+            return;
+        }
+        FragmentedMp4Writer writer;
+        std::string error;
+        struct StreamOutputState {
+            std::vector<std::uint8_t> initialization;
+            bool initialized = false;
+        };
+        const auto output_state = std::make_shared<StreamOutputState>();
+        if (!writer.open(
+                initial.front().packet.stream(), encode_options,
+                [this, fd = client->fd, output_state](const std::uint8_t* bytes, std::size_t size) {
+                    if (!output_state->initialized) {
+                        output_state->initialization.insert(output_state->initialization.end(),
+                                                            bytes, bytes + size);
+                        return true;
+                    }
+                    return send_all(fd, bytes, size);
+                },
+                &error)) {
+            (void)send_text(client->fd, 503, "Service Unavailable", "text/plain", error + "\n");
+            return;
+        }
+        const std::string headers =
+            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n";
+        if (!send_all(client->fd, headers.data(), headers.size()) ||
+            !send_all(client->fd, output_state->initialization.data(),
+                      output_state->initialization.size()))
+            return;
+        output_state->initialized = true;
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            ++video_stream_clients_[camera];
+        }
+        std::uint64_t delivered = 0;
+        for (const auto& packet : initial) {
+            if (!writer.write(packet.packet, &error))
+                break;
+            delivered = packet.version;
+        }
+        while (running_.load() && error.empty()) {
+            PublishedVideoPacket next;
+            {
+                std::unique_lock<std::mutex> lock(frames_mutex_);
+                frames_changed_.wait(lock, [&] {
+                    const auto found = video_packets_.find(camera);
+                    return !running_.load() ||
+                           (found != video_packets_.end() && !found->second.empty() &&
+                            found->second.back().version > delivered);
+                });
+                if (!running_.load())
+                    break;
+                const auto& packets = video_packets_.at(camera);
+                const auto found = std::find_if(packets.begin(), packets.end(), [&](const auto& p) {
+                    return p.version > delivered;
+                });
+                if (found == packets.end())
+                    continue;
+                next = *found;
+            }
+            if (!writer.write(next.packet, &error))
+                break;
+            delivered = next.version;
+        }
+        writer.close(nullptr);
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            const auto found = video_stream_clients_.find(camera);
+            if (found != video_stream_clients_.end() && --found->second == 0)
+                video_stream_clients_.erase(found);
+        }
         return;
     }
     if (action != "/mjpg" && action != "/mjpg/stream") {
