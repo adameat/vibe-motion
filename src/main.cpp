@@ -1,4 +1,5 @@
 #include "vibe_motion/config.hpp"
+#include "vibe_motion/hooks.hpp"
 #include "vibe_motion/log.hpp"
 #include "vibe_motion/runtime.hpp"
 
@@ -9,12 +10,14 @@ extern "C" {
 }
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -42,6 +45,21 @@ void usage(std::ostream& output) {
 } // namespace
 
 int main(int argc, char** argv) try {
+    if (argc == 4 && std::string(argv[1]) == "--hook-supervisor") {
+        std::size_t consumed = 0;
+        const int socket = std::stoi(argv[2], &consumed);
+        if (consumed != std::string(argv[2]).size() || socket < 0 || argv[3][0] == '\0') {
+            throw std::runtime_error("invalid hook supervisor arguments");
+        }
+        if (const char* delay = std::getenv("VIBE_HOOK_SUPERVISOR_START_DELAY_MS")) {
+            const int milliseconds = std::stoi(delay);
+            if (milliseconds > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+            }
+        }
+        return vibe_motion::run_hook_supervisor(socket, argv[3]);
+    }
+
     std::filesystem::path config_path = "/etc/motion/motion.conf";
     bool foreground = false;
     bool check_config = false;

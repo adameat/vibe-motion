@@ -1,18 +1,22 @@
 #include "vibe_motion/hooks.hpp"
 
+#include "vibe_motion/log.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
-#include <filesystem>
 #include <poll.h>
+#include <spawn.h>
 #include <stdexcept>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 namespace vibe_motion {
 namespace {
@@ -23,30 +27,7 @@ constexpr std::uint32_t response_launched = 1;
 constexpr std::uint32_t response_finished = 2;
 // Keep each SOCK_SEQPACKET message comfortably below Linux's default Unix
 // socket send-buffer limit. Motion hook command lines are normally tiny.
-constexpr std::size_t maximum_request_size = 64 * 1024;
-
-void require_single_threaded_process() {
-    std::error_code error;
-    std::filesystem::directory_iterator task("/proc/self/task", error);
-    const std::filesystem::directory_iterator end;
-    if (error) {
-        throw std::runtime_error("cannot inspect process threads: " + error.message());
-    }
-
-    std::size_t task_count = 0;
-    while (task != end) {
-        if (++task_count > 1) {
-            throw std::logic_error("HookExecutor must be constructed before other threads start");
-        }
-        task.increment(error);
-        if (error) {
-            throw std::runtime_error("cannot inspect process threads: " + error.message());
-        }
-    }
-    if (task_count != 1) {
-        throw std::runtime_error("cannot determine process thread count");
-    }
-}
+constexpr std::size_t maximum_request_size = std::size_t{64} * 1024;
 
 struct RequestHeader {
     std::uint32_t type = 0;
@@ -69,21 +50,28 @@ struct SupervisorChild {
     int error_fd = -1;
 };
 
-bool send_packet(int socket, const void* data, std::size_t size) {
+bool send_packet(int socket, const void* data, std::size_t size, int* error = nullptr) {
     for (;;) {
         const auto sent = ::send(socket, data, size, MSG_NOSIGNAL);
         if (sent == static_cast<ssize_t>(size)) {
+            if (error != nullptr) {
+                *error = 0;
+            }
             return true;
         }
-        if (sent < 0 && errno == EINTR) {
+        const int send_error = sent < 0 ? errno : EIO;
+        if (send_error == EINTR) {
             continue;
+        }
+        if (error != nullptr) {
+            *error = send_error;
         }
         return false;
     }
 }
 
-void send_response(int socket, const SupervisorResponse& response) {
-    (void)send_packet(socket, &response, sizeof(response));
+bool send_response(int socket, const SupervisorResponse& response) {
+    return send_packet(socket, &response, sizeof(response));
 }
 
 int hook_supervisor(int socket, const std::string& process_name) {
@@ -137,15 +125,19 @@ int hook_supervisor(int socket, const std::string& process_name) {
                     valid = valid && offset == static_cast<std::size_t>(received) &&
                             !arguments.front().empty();
                     if (!valid) {
-                        send_response(socket,
-                                      {response_finished, 0, header.job_id, -1, 127 << 8, EINVAL});
+                        if (!send_response(socket, {response_finished, 0, header.job_id, -1,
+                                                    127 << 8, EINVAL})) {
+                            stopping = true;
+                        }
                         continue;
                     }
 
                     int error_pipe[2] = {-1, -1};
                     if (::pipe2(error_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
-                        send_response(socket,
-                                      {response_finished, 0, header.job_id, -1, 127 << 8, errno});
+                        if (!send_response(socket, {response_finished, 0, header.job_id, -1,
+                                                    127 << 8, errno})) {
+                            stopping = true;
+                        }
                         continue;
                     }
                     std::vector<char*> raw_arguments;
@@ -155,10 +147,15 @@ int hook_supervisor(int socket, const std::string& process_name) {
                     }
                     raw_arguments.push_back(nullptr);
 
+                    const pid_t supervisor_pid = ::getpid();
                     const pid_t pid = ::fork();
                     if (pid == 0) {
                         ::close(socket);
                         ::close(error_pipe[0]);
+                        (void)::prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+                        if (::getppid() != supervisor_pid) {
+                            ::_exit(127);
+                        }
                         (void)::setsid();
                         ::execvp(raw_arguments.front(), raw_arguments.data());
                         const int child_errno = errno;
@@ -169,12 +166,16 @@ int hook_supervisor(int socket, const std::string& process_name) {
                     if (pid < 0) {
                         const int saved_errno = errno;
                         ::close(error_pipe[0]);
-                        send_response(socket, {response_finished, 0, header.job_id, -1, 127 << 8,
-                                               saved_errno});
+                        if (!send_response(socket, {response_finished, 0, header.job_id, -1,
+                                                    127 << 8, saved_errno})) {
+                            stopping = true;
+                        }
                         continue;
                     }
                     children.push_back({header.job_id, pid, error_pipe[0]});
-                    send_response(socket, {response_launched, 0, header.job_id, pid, 0, 0});
+                    if (!send_response(socket, {response_launched, 0, header.job_id, pid, 0, 0})) {
+                        stopping = true;
+                    }
                 }
             }
         } else if (polled > 0 && (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
@@ -191,8 +192,10 @@ int hook_supervisor(int socket, const std::string& process_name) {
                     exec_error = 0;
                 }
                 ::close(children[index].error_fd);
-                send_response(socket, {response_finished, 0, children[index].job_id,
-                                       children[index].pid, status, exec_error});
+                if (!send_response(socket, {response_finished, 0, children[index].job_id,
+                                            children[index].pid, status, exec_error})) {
+                    stopping = true;
+                }
                 children.erase(children.begin() + static_cast<std::ptrdiff_t>(index));
                 continue;
             }
@@ -217,6 +220,10 @@ std::string token_value(char conversion, const HookTokens& tokens, bool& found) 
 }
 
 } // namespace
+
+int run_hook_supervisor(int socket, const std::string& process_name) {
+    return hook_supervisor(socket, process_name);
+}
 
 std::vector<std::string> parse_hook_command(const std::string& command) {
     enum class Quote { none, single, double_quote };
@@ -301,35 +308,14 @@ std::string expand_hook_tokens(const std::string& value, const HookTokens& token
 HookExecutor::HookExecutor(HookExecutorOptions options) : options_(std::move(options)) {
     if (options_.max_concurrent == 0 || options_.max_pending == 0 ||
         options_.timeout.count() <= 0 || options_.terminate_grace.count() < 0 ||
-        options_.child_comm.empty()) {
+        options_.child_comm.empty() || options_.supervisor_program.empty() ||
+        options_.restart_delay.count() < 0 || options_.supervisor_socket_buffer < 0 ||
+        options_.supervisor_response_timeout.count() <= 0) {
         throw std::invalid_argument("invalid hook executor options");
     }
-    require_single_threaded_process();
-    int sockets[2] = {-1, -1};
-    if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) {
-        const int saved_errno = errno;
-        throw std::runtime_error(std::string("cannot create hook supervisor socket: ") +
-                                 std::strerror(saved_errno));
-    }
-    supervisor_pid_ = ::fork();
-    if (supervisor_pid_ == 0) {
-        ::close(sockets[0]);
-        ::_exit(hook_supervisor(sockets[1], options_.child_comm));
-    }
-    ::close(sockets[1]);
-    if (supervisor_pid_ < 0) {
-        const int saved_errno = errno;
-        ::close(sockets[0]);
+    if (!start_supervisor()) {
         throw std::runtime_error(std::string("cannot start hook supervisor: ") +
-                                 std::strerror(saved_errno));
-    }
-    supervisor_socket_ = sockets[0];
-    const int socket_flags = ::fcntl(supervisor_socket_, F_GETFL);
-    if (socket_flags < 0 || ::fcntl(supervisor_socket_, F_SETFL, socket_flags | O_NONBLOCK) != 0) {
-        const int saved_errno = errno;
-        stop_supervisor();
-        throw std::runtime_error(std::string("cannot configure hook supervisor socket: ") +
-                                 std::strerror(saved_errno));
+                                 std::strerror(last_error_));
     }
     try {
         worker_ = std::thread(&HookExecutor::run, this);
@@ -337,6 +323,72 @@ HookExecutor::HookExecutor(HookExecutorOptions options) : options_(std::move(opt
         stop_supervisor();
         throw;
     }
+}
+
+bool HookExecutor::start_supervisor() {
+    int sockets[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) {
+        last_error_ = errno;
+        return false;
+    }
+    if (options_.supervisor_socket_buffer > 0) {
+        const int size = options_.supervisor_socket_buffer;
+        for (const int socket : sockets) {
+            (void)::setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+            (void)::setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+        }
+    }
+
+    // Keep the inherited descriptor below even restrictive RLIMIT_NOFILE values.
+    constexpr int child_socket = 3;
+    posix_spawn_file_actions_t actions;
+    int spawn_error = ::posix_spawn_file_actions_init(&actions);
+    const bool actions_initialized = spawn_error == 0;
+    if (spawn_error == 0) {
+        spawn_error = ::posix_spawn_file_actions_adddup2(&actions, sockets[1], child_socket);
+    }
+    if (spawn_error == 0 && sockets[0] != child_socket) {
+        spawn_error = ::posix_spawn_file_actions_addclose(&actions, sockets[0]);
+    }
+    if (spawn_error == 0 && sockets[1] != child_socket) {
+        spawn_error = ::posix_spawn_file_actions_addclose(&actions, sockets[1]);
+    }
+    std::string socket_argument = std::to_string(child_socket);
+    std::vector<char*> arguments{options_.supervisor_program.data(),
+                                 const_cast<char*>("--hook-supervisor"), socket_argument.data(),
+                                 options_.child_comm.data(), nullptr};
+    pid_t spawned_pid = -1;
+    if (spawn_error == 0) {
+        spawn_error = ::posix_spawn(&spawned_pid, options_.supervisor_program.c_str(), &actions,
+                                    nullptr, arguments.data(), environ);
+    }
+    if (actions_initialized) {
+        (void)::posix_spawn_file_actions_destroy(&actions);
+    }
+    ::close(sockets[1]);
+    if (spawn_error != 0) {
+        ::close(sockets[0]);
+        last_error_ = spawn_error;
+        return false;
+    }
+    const int socket_flags = ::fcntl(sockets[0], F_GETFL);
+    if (socket_flags < 0 || ::fcntl(sockets[0], F_SETFL, socket_flags | O_NONBLOCK) != 0) {
+        const int saved_errno = errno;
+        ::close(sockets[0]);
+        (void)::kill(spawned_pid, SIGKILL);
+        int status = 0;
+        while (::waitpid(spawned_pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        last_error_ = saved_errno;
+        return false;
+    }
+    supervisor_socket_ = sockets[0];
+    supervisor_pid_ = spawned_pid;
+    if (supervisor_failed_) {
+        ++supervisor_restarts_;
+    }
+    supervisor_failed_ = false;
+    return true;
 }
 
 HookExecutor::~HookExecutor() {
@@ -353,6 +405,11 @@ bool HookExecutor::submit(const std::string& command, const HookTokens& tokens,
 }
 
 bool HookExecutor::submit(std::vector<std::string> argv, HookCompletion completion) {
+    return submit(std::move(argv), HookSubmitOptions{}, std::move(completion));
+}
+
+bool HookExecutor::submit(std::vector<std::string> argv, HookSubmitOptions options,
+                          HookCompletion completion) {
     if (argv.empty() || argv.front().empty()) {
         throw std::invalid_argument("hook argv is empty");
     }
@@ -362,17 +419,33 @@ bool HookExecutor::submit(std::vector<std::string> argv, HookCompletion completi
         }
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_ || jobs_.size() >= options_.max_pending) {
+    ++submitted_;
+    if (stopping_) {
+        ++dropped_;
         return false;
     }
-    jobs_.push_back({std::move(argv), std::move(completion)});
+    Job job{std::move(argv), std::move(options), std::move(completion)};
+    if (coalesce_pending(job)) {
+        wake_.notify_one();
+        return true;
+    }
+    if (pending_unlocked() >= options_.max_pending &&
+        (job.options.priority != HookPriority::critical || !evict_coalescible_job())) {
+        ++dropped_;
+        return false;
+    }
+    if (job.options.priority == HookPriority::critical) {
+        critical_jobs_.push_back(std::move(job));
+    } else {
+        jobs_.push_back(std::move(job));
+    }
     wake_.notify_one();
     return true;
 }
 
 std::size_t HookExecutor::pending() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return jobs_.size();
+    return pending_unlocked();
 }
 
 std::size_t HookExecutor::running() const {
@@ -380,9 +453,30 @@ std::size_t HookExecutor::running() const {
     return children_.size();
 }
 
+HookExecutorStatus HookExecutor::status() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {.pending = pending_unlocked(),
+            .running = children_.size(),
+            .max_pending = options_.max_pending,
+            .max_concurrent = options_.max_concurrent,
+            .submitted = submitted_,
+            .completed = completed_,
+            .timed_out = timed_out_,
+            .failed = failed_,
+            .dropped = dropped_,
+            .coalesced = coalesced_,
+            .backpressure = backpressure_,
+            .supervisor_restarts = supervisor_restarts_,
+            .supervisor_healthy =
+                !supervisor_failed_ && supervisor_socket_ >= 0 && supervisor_pid_ > 0,
+            .supervisor_pid = static_cast<int>(supervisor_pid_),
+            .last_error = last_error_};
+}
+
 bool HookExecutor::wait_idle(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return idle_.wait_for(lock, timeout, [&] { return jobs_.empty() && children_.empty(); });
+    return idle_.wait_for(lock, timeout,
+                          [&] { return pending_unlocked() == 0 && children_.empty(); });
 }
 
 void HookExecutor::stop() {
@@ -392,6 +486,8 @@ void HookExecutor::stop() {
             return;
         }
         stopping_ = true;
+        dropped_ += pending_unlocked();
+        critical_jobs_.clear();
         jobs_.clear();
         for (auto& child : children_) {
             if (child.pid > 0 && !child.timed_out) {
@@ -404,6 +500,75 @@ void HookExecutor::stop() {
     wake_.notify_all();
     if (worker_.joinable()) {
         worker_.join();
+    }
+}
+
+std::size_t HookExecutor::pending_unlocked() const noexcept {
+    return critical_jobs_.size() + jobs_.size();
+}
+
+HookExecutor::Job HookExecutor::pop_next_job() {
+    std::deque<Job>& queue = critical_jobs_.empty() ? jobs_ : critical_jobs_;
+    Job job = std::move(queue.front());
+    queue.pop_front();
+    return job;
+}
+
+bool HookExecutor::coalesce_pending(Job& replacement) {
+    if (replacement.options.coalesce_key.empty()) {
+        return false;
+    }
+    const auto replace_in = [&](std::deque<Job>& queue) {
+        const auto found = std::find_if(queue.begin(), queue.end(), [&](const Job& existing) {
+            return existing.options.coalesce_key == replacement.options.coalesce_key;
+        });
+        if (found == queue.end()) {
+            return false;
+        }
+        if (found->completion) {
+            HookResult result;
+            result.argv = std::move(found->argv);
+            result.exec_errno = ECANCELED;
+            completions_.emplace_back(std::move(found->completion), std::move(result));
+        }
+        queue.erase(found);
+        std::deque<Job>& replacement_queue =
+            replacement.options.priority == HookPriority::critical ? critical_jobs_ : jobs_;
+        replacement_queue.push_back(std::move(replacement));
+        ++coalesced_;
+        return true;
+    };
+    return replace_in(critical_jobs_) || replace_in(jobs_);
+}
+
+bool HookExecutor::evict_coalescible_job() {
+    const auto found = std::find_if(jobs_.begin(), jobs_.end(), [](const Job& job) {
+        return !job.options.coalesce_key.empty();
+    });
+    if (found == jobs_.end()) {
+        return false;
+    }
+    if (found->completion) {
+        HookResult result;
+        result.argv = std::move(found->argv);
+        result.exec_errno = ECANCELED;
+        completions_.emplace_back(std::move(found->completion), std::move(result));
+    }
+    jobs_.erase(found);
+    ++dropped_;
+    return true;
+}
+
+void HookExecutor::complete_job(Job job, int error) {
+    ++completed_;
+    if (error != 0) {
+        ++failed_;
+    }
+    if (job.completion) {
+        HookResult result;
+        result.argv = std::move(job.argv);
+        result.exec_errno = error;
+        completions_.emplace_back(std::move(job.completion), std::move(result));
     }
 }
 
@@ -420,12 +585,7 @@ bool HookExecutor::launch(Job& job) {
         request_size += sizeof(std::uint32_t) + argument.size();
     }
     if (request_too_large) {
-        HookResult result;
-        result.argv = job.argv;
-        result.exec_errno = E2BIG;
-        if (job.completion) {
-            completions_.emplace_back(std::move(job.completion), std::move(result));
-        }
+        complete_job(std::move(job), E2BIG);
         return true;
     }
 
@@ -440,17 +600,14 @@ bool HookExecutor::launch(Job& job) {
         std::memcpy(request.data() + offset, argument.data(), argument.size());
         offset += argument.size();
     }
-    if (!send_packet(supervisor_socket_, request.data(), request.size())) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    int send_error = 0;
+    if (!send_packet(supervisor_socket_, request.data(), request.size(), &send_error)) {
+        if (send_error == EAGAIN || send_error == EWOULDBLOCK) {
+            ++backpressure_;
             return false;
         }
-        const int send_error = errno == 0 ? EPIPE : errno;
-        HookResult result;
-        result.argv = job.argv;
-        result.exec_errno = send_error;
-        if (job.completion) {
-            completions_.emplace_back(std::move(job.completion), std::move(result));
-        }
+        send_error = send_error == 0 ? EPIPE : send_error;
+        complete_job(std::move(job), send_error);
         fail_supervisor(send_error);
         return true;
     }
@@ -473,6 +630,13 @@ void HookExecutor::finish(std::size_t index, int status, int exec_error) {
     } else if (WIFSIGNALED(status)) {
         result.term_signal = WTERMSIG(status);
     }
+    ++completed_;
+    if (result.timed_out) {
+        ++timed_out_;
+    }
+    if (result.exec_errno != 0 || result.exit_code != 0 || result.term_signal != 0) {
+        ++failed_;
+    }
     if (child.job.completion) {
         completions_.emplace_back(std::move(child.job.completion), std::move(result));
     }
@@ -484,6 +648,8 @@ void HookExecutor::receive_supervisor_results() {
     }
     for (;;) {
         SupervisorResponse response{};
+        // The socket is nonblocking and MSG_DONTWAIT is explicit.
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
         const auto received = ::recv(supervisor_socket_, &response, sizeof(response), MSG_DONTWAIT);
         if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             break;
@@ -518,11 +684,14 @@ void HookExecutor::fail_supervisor(int error) {
         return;
     }
     supervisor_failed_ = true;
-    stopping_ = true;
     const int failure = error == 0 ? EPIPE : error;
+    last_error_ = failure;
     if (supervisor_socket_ >= 0) {
         ::close(supervisor_socket_);
         supervisor_socket_ = -1;
+    }
+    if (supervisor_pid_ > 0) {
+        (void)::kill(supervisor_pid_, SIGKILL);
     }
     reap_supervisor_nonblocking();
     while (!children_.empty()) {
@@ -531,15 +700,11 @@ void HookExecutor::fail_supervisor(int error) {
         }
         finish(0, 127 << 8, failure);
     }
-    while (!jobs_.empty()) {
-        Job job = std::move(jobs_.front());
-        jobs_.pop_front();
-        if (job.completion) {
-            HookResult result;
-            result.argv = std::move(job.argv);
-            result.exec_errno = failure;
-            completions_.emplace_back(std::move(job.completion), std::move(result));
-        }
+    if (!stopping_) {
+        restart_after_ = std::chrono::steady_clock::now() + options_.restart_delay;
+        Logger::instance().write(LogLevel::error,
+                                 "hook supervisor failed: ", std::strerror(failure),
+                                 "; recovery scheduled");
     }
 }
 
@@ -551,6 +716,10 @@ void HookExecutor::reap_and_expire() {
     const auto now = std::chrono::steady_clock::now();
     for (std::size_t index = 0; index < children_.size();) {
         auto& child = children_[index];
+        if (child.pid < 0 && now - child.started >= options_.supervisor_response_timeout) {
+            fail_supervisor(ETIMEDOUT);
+            return;
+        }
         if (child.pid > 0 && !child.timed_out &&
             (stopping_ || now - child.started >= options_.timeout)) {
             (void)::kill(-child.pid, SIGTERM);
@@ -597,11 +766,23 @@ void HookExecutor::stop_supervisor() noexcept {
 void HookExecutor::run() {
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
-        while (!stopping_ && !jobs_.empty() && children_.size() < options_.max_concurrent) {
-            Job job = std::move(jobs_.front());
-            jobs_.pop_front();
+        if (!stopping_ && supervisor_failed_ && supervisor_pid_ <= 0 &&
+            std::chrono::steady_clock::now() >= restart_after_) {
+            if (start_supervisor()) {
+                Logger::instance().write(LogLevel::info, "hook supervisor restarted");
+            } else {
+                restart_after_ = std::chrono::steady_clock::now() + options_.restart_delay;
+            }
+        }
+        while (!stopping_ && !supervisor_failed_ && pending_unlocked() > 0 &&
+               children_.size() < options_.max_concurrent) {
+            Job job = pop_next_job();
             if (!launch(job)) {
-                jobs_.push_front(std::move(job));
+                if (job.options.priority == HookPriority::critical) {
+                    critical_jobs_.push_front(std::move(job));
+                } else {
+                    jobs_.push_front(std::move(job));
+                }
                 break;
             }
         }
@@ -617,7 +798,7 @@ void HookExecutor::run() {
             }
             lock.lock();
         }
-        if (jobs_.empty() && children_.empty()) {
+        if (pending_unlocked() == 0 && children_.empty()) {
             idle_.notify_all();
             if (stopping_) {
                 break;

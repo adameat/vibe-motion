@@ -13,6 +13,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
@@ -75,6 +77,10 @@ std::string json_escape(const std::string& value) {
         }
     }
     return output.str();
+}
+
+std::string error_message(int error) {
+    return error == 0 ? std::string{} : std::error_code(error, std::generic_category()).message();
 }
 
 void append_json_map(std::ostringstream& output, const std::map<std::string, std::string>& values) {
@@ -479,7 +485,8 @@ class CameraWorker {
     }
 
     void hook(const std::string& command, const ExpansionContext& values,
-              std::chrono::system_clock::time_point when) {
+              std::chrono::system_clock::time_point when, const std::string& kind,
+              HookPriority priority = HookPriority::normal, std::string coalesce_key = {}) {
         if (command.empty()) {
             return;
         }
@@ -488,9 +495,16 @@ class CameraWorker {
             for (auto& argument : argv) {
                 argument = expand_template(argument, values, when);
             }
-            if (!hooks_.submit(std::move(argv))) {
-                Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
-                                         ": hook queue full");
+            if (!hooks_.submit(std::move(argv), {.priority = priority,
+                                                 .kind = kind,
+                                                 .camera_id = config_.camera_id,
+                                                 .coalesce_key = std::move(coalesce_key)})) {
+                const auto status = hooks_.status();
+                Logger::instance().write(
+                    LogLevel::warning, "camera ", config_.camera_id, ": hook dropped kind=", kind,
+                    " pending=", status.pending, '/', status.max_pending,
+                    " running=", status.running, '/', status.max_concurrent,
+                    " supervisor=", status.supervisor_healthy ? "healthy" : "failed");
             }
         } catch (const std::exception& error) {
             Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
@@ -520,7 +534,8 @@ class CameraWorker {
         update_lastsnap(path);
         values.filename = path.string();
         values.file_type = "picture";
-        hook(config_.on_picture_save, values, frame.captured_at);
+        hook(config_.on_picture_save, values, frame.captured_at, "snapshot", HookPriority::normal,
+             "snapshot:" + std::to_string(config_.camera_id));
     }
 
     void finish_event(EventMovieWriter& movie, std::filesystem::path& movie_path,
@@ -538,7 +553,8 @@ class CameraWorker {
                 write_atomic(picture, best_jpeg);
                 values.filename = picture.string();
                 values.file_type = "picture";
-                hook(config_.on_picture_save, values, picture_when);
+                hook(config_.on_picture_save, values, picture_when, "event-picture",
+                     HookPriority::critical);
             } catch (const std::exception& error) {
                 Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                          ": picture write failed: ", error.what());
@@ -546,13 +562,13 @@ class CameraWorker {
         }
         values.filename.clear();
         values.file_type.clear();
-        hook(config_.on_event_end, values, end_when);
+        hook(config_.on_event_end, values, end_when, "event-end", HookPriority::critical);
         if (movie.is_open()) {
             std::string error;
             movie.close(&error);
             values.filename = movie_path.string();
             values.file_type = "movie";
-            hook(config_.on_movie_end, values, end_when);
+            hook(config_.on_movie_end, values, end_when, "movie-end", HookPriority::critical);
             if (!error.empty()) {
                 set_status([&](WorkerStatus& state) { state.movie_error = redact_secrets(error); });
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
@@ -933,7 +949,8 @@ class CameraWorker {
                     const auto event_when = pending_onvif_event_time.value_or(frame.captured_at);
                     pending_onvif_event_time.reset();
                     auto values = context(detection, frame, decision.event_number);
-                    hook(config_.on_event_start, values, event_when);
+                    hook(config_.on_event_start, values, event_when, "event-start",
+                         HookPriority::critical);
                     if (config_.movie_output) {
                         movie_path = output_path(config_.movie_filename,
                                                  config_.movie_container == "mp4" ? ".mp4" : ".mkv",
@@ -957,7 +974,8 @@ class CameraWorker {
                                     LogLevel::warning, "camera ", config_.camera_id,
                                     ": movie preroll: ", redact_secrets(error));
                             }
-                            hook(config_.on_movie_start, values, event_when);
+                            hook(config_.on_movie_start, values, event_when, "movie-start",
+                                 HookPriority::critical);
                         } else {
                             set_status([&](WorkerStatus& state) {
                                 state.movie_error = redact_secrets(error);
@@ -1155,9 +1173,23 @@ class Application::Impl {
 
   private:
     std::string status_json() const {
+        const auto hook_status = hooks_.status();
         std::lock_guard<std::mutex> workers_lock(workers_mutex_);
         std::ostringstream output;
-        output << "{\"service\":\"vibe-motion\",\"cameras\":[";
+        output << "{\"service\":\"vibe-motion\",\"hooks\":{\"pending\":" << hook_status.pending
+               << ",\"running\":" << hook_status.running
+               << ",\"max_pending\":" << hook_status.max_pending
+               << ",\"max_concurrent\":" << hook_status.max_concurrent
+               << ",\"submitted\":" << hook_status.submitted
+               << ",\"completed\":" << hook_status.completed
+               << ",\"timed_out\":" << hook_status.timed_out << ",\"failed\":" << hook_status.failed
+               << ",\"dropped\":" << hook_status.dropped
+               << ",\"coalesced\":" << hook_status.coalesced
+               << ",\"backpressure\":" << hook_status.backpressure
+               << ",\"supervisor_healthy\":" << (hook_status.supervisor_healthy ? "true" : "false")
+               << ",\"supervisor_restarts\":" << hook_status.supervisor_restarts
+               << ",\"last_error\":" << hook_status.last_error << ",\"last_error_text\":\""
+               << json_escape(error_message(hook_status.last_error)) << "\"},\"cameras\":[";
         bool first = true;
         for (const auto& worker : workers_) {
             const auto state = worker->status();
