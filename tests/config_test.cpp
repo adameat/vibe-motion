@@ -20,6 +20,17 @@ template <typename Function> void expect_config_error(Function function) {
     assert(thrown);
 }
 
+template <typename Function>
+void expect_config_error_message(Function function, const std::string& expected) {
+    try {
+        function();
+    } catch (const ConfigError& error) {
+        assert(std::string(error.what()).find(expected) != std::string::npos);
+        return;
+    }
+    assert(false);
+}
+
 } // namespace
 
 int main() {
@@ -238,6 +249,28 @@ int main() {
         invalid.cameras.front().stream_encoder = "definitely-not-an-encoder";
         invalid.validate();
     });
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().movie_codec = "invalid";
+            invalid.validate();
+        },
+        "movie_codec must be copy, passthrough, h264, hevc, or h265");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().movie_codec = "passthrough";
+            invalid.cameras.front().movie_passthrough = false;
+            invalid.validate();
+        },
+        "movie_codec copy/passthrough requires movie_passthrough on");
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().stream_codec = "invalid";
+            invalid.validate();
+        },
+        "stream_codec must be mjpeg, copy, h264, hevc, or h265");
     expect_config_error([&] {
         Config invalid = deployment;
         invalid.cameras.front().timelapse_codec = "hevc";

@@ -563,7 +563,7 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         }
         return;
     }
-    if (action == "/video.mp4" || action == "/hevc.mp4") {
+    if (action == "/video.mp4") {
         std::vector<PublishedVideoPacket> initial;
         VideoEncodeOptions encode_options;
         {

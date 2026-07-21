@@ -132,6 +132,8 @@ int main(int, char** argv) {
     const auto long_stream = get_headers(server.port(), "/7/mjpg/stream");
     assert(long_stream.find("200 OK") != std::string::npos);
     assert(long_stream.find("multipart/x-mixed-replace") != std::string::npos);
+    const auto misleading_hevc_alias = get(server.port(), "/7/hevc.mp4");
+    assert(misleading_hevc_alias.find("404 Not Found") != std::string::npos);
 
     const auto fixture = std::filesystem::path(argv[0]).parent_path() / "media-fixture.mp4";
     if (std::filesystem::exists(fixture)) {

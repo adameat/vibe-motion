@@ -676,7 +676,7 @@ void Config::validate() const {
         check_range(c.movie_codec == "copy" || c.movie_codec == "passthrough" ||
                         c.movie_codec == "h264" || c.movie_codec == "hevc" ||
                         c.movie_codec == "h265",
-                    c, "movie_codec must be copy, h264, or hevc");
+                    c, "movie_codec must be copy, passthrough, h264, hevc, or h265");
         check_range(c.movie_bitrate >= 0 && c.movie_bitrate <= 1000000000, c,
                     "movie_bitrate must be between 0 and 1000000000");
         check_range(c.movie_keyframe_interval > 0 && c.movie_keyframe_interval <= 86400, c,
@@ -686,7 +686,7 @@ void Config::validate() const {
         check_range(!c.movie_output ||
                         (c.movie_codec != "copy" && c.movie_codec != "passthrough") ||
                         c.movie_passthrough,
-                    c, "movie_codec copy requires movie_passthrough on");
+                    c, "movie_codec copy/passthrough requires movie_passthrough on");
         check_range(!c.movie_output || c.movie_codec == "copy" || c.movie_codec == "passthrough" ||
                         video_encoder_available(c.movie_codec, c.movie_encoder),
                     c, "requested movie encoder is unavailable or has the wrong codec");
@@ -727,7 +727,7 @@ void Config::validate() const {
         check_range(c.stream_codec == "mjpeg" || c.stream_codec == "copy" ||
                         c.stream_codec == "h264" || c.stream_codec == "hevc" ||
                         c.stream_codec == "h265",
-                    c, "stream_codec must be mjpeg, copy, h264, or hevc");
+                    c, "stream_codec must be mjpeg, copy, h264, hevc, or h265");
         check_range(c.stream_quality >= 0 && c.stream_quality <= 100, c,
                     "stream_quality must be between 0 and 100");
         check_range(c.stream_bitrate >= 0 && c.stream_bitrate <= 1000000000, c,
