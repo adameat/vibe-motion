@@ -138,7 +138,9 @@ if(VIBE_BUILD_TESTS)
   foreach(test_name decode detection event config hooks http media onvif)
     add_executable(${test_name}_test tests/${test_name}_test.cpp)
     target_link_libraries(${test_name}_test PRIVATE vibe_motion_core)
-    target_compile_options(${test_name}_test PRIVATE ${VIBE_CLANG_WARNINGS})
+    # The tests intentionally use assert() for checks and for calls whose
+    # results are under test. Keep those expressions active in Release builds.
+    target_compile_options(${test_name}_test PRIVATE ${VIBE_CLANG_WARNINGS} -UNDEBUG)
     add_test(NAME ${test_name} COMMAND ${test_name}_test)
   endforeach()
   add_dependencies(hooks_test vibe-motion)

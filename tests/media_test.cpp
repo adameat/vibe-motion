@@ -53,6 +53,7 @@ static void test_decoded_frame_quality() {
 struct DecodedVideoStats {
     int frames = 0;
     int keyframes = 0;
+    int discard_packets = 0;
     bool has_color = false;
     std::string codec;
     std::string codec_tag;
@@ -130,6 +131,7 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
     while (av_read_frame(format, packet) >= 0) {
         if (packet->stream_index == video_stream) {
             stats.keyframes += (packet->flags & AV_PKT_FLAG_KEY) != 0 ? 1 : 0;
+            stats.discard_packets += (packet->flags & AV_PKT_FLAG_DISCARD) != 0 ? 1 : 0;
             assert(avcodec_send_packet(decoder, packet) >= 0);
             receive_frames(decoder, frame, stats);
         }
@@ -259,6 +261,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         const auto transcoded_event_stats = decoded_video_stats(transcoded_event_path);
         assert(transcoded_event_stats.codec == transcode_codec);
         assert(transcoded_event_stats.frames == static_cast<int>(preroll.size()));
+        assert(transcoded_event_stats.discard_packets == 0);
 
         std::vector<std::uint8_t> transcoded_fragmented_bytes;
         FragmentedMp4Writer transcoded_fragmented;
@@ -281,6 +284,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         const auto transcoded_fragmented_stats = decoded_video_stats(transcoded_fragmented_path);
         assert(transcoded_fragmented_stats.codec == transcode_codec);
         assert(transcoded_fragmented_stats.frames == static_cast<int>(preroll.size()));
+        assert(transcoded_fragmented_stats.discard_packets == 0);
     }
 
     TimelapseWriter timelapse;
