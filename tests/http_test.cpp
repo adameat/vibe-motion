@@ -1,6 +1,8 @@
 #include "vibe_motion/http.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -75,6 +77,31 @@ static std::string get_headers(std::uint16_t port, const std::string& path) {
     return response;
 }
 
+static std::string get_until(std::uint16_t port, const std::string& path,
+                             const std::string& marker) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+    assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request =
+        "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    send_all(fd, request);
+    std::string response;
+    char buffer[4096];
+    while (response.find(marker) == std::string::npos) {
+        const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (count < 0 && errno == EINTR)
+            continue;
+        assert(count > 0);
+        response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    return response;
+}
+
 int main(int, char** argv) {
     HttpServer server({"127.0.0.1", 0, 8, std::chrono::milliseconds(1000)},
                       [] { return "{\"ok\":true}"; });
@@ -113,6 +140,7 @@ int main(int, char** argv) {
         config.jpeg_quality = 0;
         NetworkCameraSource source(config);
         std::string error;
+        std::vector<VideoPacket> packets;
         assert(source.open(&error));
         for (;;) {
             auto read = source.read();
@@ -122,11 +150,44 @@ int main(int, char** argv) {
                 continue;
             assert(read.status == CameraReadStatus::sample && read.sample);
             server.publish_video("7", read.sample->packet);
+            if (read.sample->packet.valid())
+                packets.push_back(read.sample->packet);
         }
         source.close();
         const auto video = get_headers(server.port(), "/7/video.mp4");
         assert(video.find("200 OK") != std::string::npos);
         assert(video.find("Content-Type: video/mp4") != std::string::npos);
+
+        assert(!packets.empty() && packets.front().keyframe());
+        const auto next_keyframe =
+            std::find_if(std::next(packets.begin()), packets.end(),
+                         [](const VideoPacket& packet) { return packet.keyframe(); });
+        assert(next_keyframe != packets.end());
+        server.publish_timelapse_video("7", packets.front());
+        std::string timelapse_video;
+        std::atomic<bool> timelapse_done{false};
+        std::thread timelapse_requester([&] {
+            timelapse_video = get_until(server.port(), "/7/timelapse.mp4", "moof");
+            timelapse_done.store(true);
+        });
+        for (int attempt = 0; attempt < 100 && !server.has_timelapse_stream_clients("7");
+             ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        assert(server.has_timelapse_stream_clients("7"));
+        for (auto packet = std::next(packets.begin()); packet != next_keyframe; ++packet)
+            server.publish_timelapse_video("7", *packet);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        assert(!timelapse_done.load());
+        server.publish_timelapse_video("7", *next_keyframe);
+        const auto after_keyframe = std::next(next_keyframe);
+        assert(after_keyframe != packets.end());
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        server.publish_timelapse_video("7", *after_keyframe);
+        timelapse_requester.join();
+        assert(timelapse_video.find("200 OK") != std::string::npos);
+        assert(timelapse_video.find("Content-Type: video/mp4") != std::string::npos);
+        assert(timelapse_video.find("moof") != std::string::npos);
     }
     server.stop();
 

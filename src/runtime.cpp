@@ -638,6 +638,10 @@ class CameraWorker {
         const bool dynamic_full_decode = config_.decode_frames == "auto" &&
                                          configured_idle_decode_mode == FrameDecodeMode::keyframes;
         const std::string camera_key = std::to_string(config_.camera_id);
+        timelapse.set_packet_callback([this, camera_key](const VideoPacket& packet) {
+            if (http_ != nullptr)
+                http_->publish_timelapse_video(camera_key, packet);
+        });
 
         while (!stopping_.load()) {
             std::string media_url = config_.netcam_url;

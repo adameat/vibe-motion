@@ -307,6 +307,9 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
 
     if (has_h264_encoder) {
         TimelapseWriter h264_timelapse;
+        std::vector<VideoPacket> h264_packets;
+        h264_timelapse.set_packet_callback(
+            [&](const VideoPacket& packet) { h264_packets.push_back(packet); });
         const TimelapseEncodeOptions h264_options{
             .quality = 55,
             .bitrate = 0,
@@ -324,6 +327,11 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         assert(h264_stats.frames == static_cast<int>(images.size()));
         assert(h264_stats.keyframes >= 2);
         assert(h264_stats.has_color);
+        assert(h264_packets.size() == images.size());
+        assert(h264_packets.front().stream().codec_name() == "h264");
+        assert(h264_packets.front().keyframe());
+        assert(std::count_if(h264_packets.begin(), h264_packets.end(),
+                             [](const VideoPacket& packet) { return packet.keyframe(); }) >= 2);
 
         if (std::getenv("VIBE_X264_STRESS") != nullptr) {
             auto stress_options = h264_options;

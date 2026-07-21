@@ -12,9 +12,9 @@ is included or copied.
 | Sources | RTMP and RTSP, ONVIF Media profile/stream discovery, TCP transport option, input dictionary parameters, timeout and reconnect, full/keyframe/automatic decode modes |
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
 | Event lifecycle | local and/or ONVIF PullPoint motion triggers, `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, H.264/HEVC passthrough or fixed-codec transcoding, best event JPEG |
-| Files | `%` expansion, snapshots, MP4/MKV passthrough movies, hourly MPEG-4 or HEVC timelapse in compatible containers, automatic parent directories |
+| Files | `%` expansion, snapshots, MP4/MKV passthrough movies, hourly MPEG-4, H.264, or HEVC timelapse in compatible containers, automatic parent directories |
 | Hooks | event start/end, picture save, movie start/end; asynchronous argv execution and exit logging |
-| HTTP | one global listener, read-only codec/status fields, latest JPEG, per-camera multipart MJPEG, H.264/HEVC fragmented-MP4 passthrough or fixed-codec transcoding |
+| HTTP | one global listener, read-only codec/status fields, latest JPEG, per-camera multipart MJPEG, H.264/HEVC fragmented-MP4 passthrough or fixed-codec transcoding, and next-keyframe live timelapse MP4 |
 | Operations | foreground/systemd operation, structured logs, signal shutdown, HUP reload, per-camera failure isolation |
 
 ## Explicitly excluded
@@ -35,7 +35,7 @@ is included or copied.
   best-event JPEGs. `text_*` overlays and HTTP `stream_preview_scale` are parsed
   but are not rendered/applied yet.
 - Only `picture_output best`, unlimited H.264/HEVC passthrough or transcoded
-  MP4/MKV event movies, and hourly MPEG-4/HEVC timelapse with configurable VBR quality,
+  MP4/MKV event movies, and hourly MPEG-4/H.264/HEVC timelapse with configurable VBR quality,
   fixed bitrate, encoder selection, and keyframe interval
   are accepted. Other parsed output modes fail config validation instead of
   silently behaving differently.

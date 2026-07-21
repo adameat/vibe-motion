@@ -210,6 +210,16 @@ void HttpServer::publish_video(std::string camera_id, const VideoPacket& packet,
     frames_changed_.notify_all();
 }
 
+void HttpServer::publish_timelapse_video(std::string camera_id, const VideoPacket& packet) {
+    if (camera_id.empty() || !packet.valid())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        timelapse_packets_[std::move(camera_id)] = {packet, next_version_++};
+    }
+    frames_changed_.notify_all();
+}
+
 PublishedJpeg HttpServer::latest(const std::string& camera_id) const {
     std::lock_guard<std::mutex> lock(frames_mutex_);
     const auto iterator = frames_.find(camera_id);
@@ -226,6 +236,12 @@ bool HttpServer::has_video_stream_clients(const std::string& camera_id) const {
     std::lock_guard<std::mutex> lock(frames_mutex_);
     const auto iterator = video_stream_clients_.find(camera_id);
     return iterator != video_stream_clients_.end() && iterator->second > 0;
+}
+
+bool HttpServer::has_timelapse_stream_clients(const std::string& camera_id) const {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    const auto iterator = timelapse_stream_clients_.find(camera_id);
+    return iterator != timelapse_stream_clients_.end() && iterator->second > 0;
 }
 
 bool HttpServer::wants_jpeg(const std::string& camera_id) const {
@@ -290,6 +306,10 @@ std::string HttpServer::root_page() const {
             if (std::find(cameras.begin(), cameras.end(), entry.first) == cameras.end())
                 cameras.push_back(entry.first);
         }
+        for (const auto& entry : timelapse_packets_) {
+            if (std::find(cameras.begin(), cameras.end(), entry.first) == cameras.end())
+                cameras.push_back(entry.first);
+        }
     }
     std::sort(cameras.begin(), cameras.end());
     std::ostringstream page;
@@ -299,7 +319,8 @@ std::string HttpServer::root_page() const {
         page << "<section><h2>Camera " << html_escape(camera) << "</h2><img src=\"/"
              << url_escape(camera) << "/mjpg/stream\" alt=\"Camera " << html_escape(camera)
              << "\"><p><a href=\"/" << url_escape(camera)
-             << "/video.mp4\">fragmented MP4 stream</a></p></section>";
+             << "/video.mp4\">fragmented MP4 stream</a> · <a href=\"/" << url_escape(camera)
+             << "/timelapse.mp4\">live timelapse stream</a></p></section>";
     }
     page << "</body></html>";
     return page.str();
@@ -455,6 +476,91 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                    send_all(client->fd, frame.bytes->data(), frame.bytes->size()));
         }
         client->done.store(true);
+        return;
+    }
+    if (action == "/timelapse.mp4") {
+        PublishedVideoPacket seed;
+        {
+            std::unique_lock<std::mutex> lock(frames_mutex_);
+            frames_changed_.wait(
+                lock, [&] { return !running_.load() || timelapse_packets_.contains(camera); });
+            if (!running_.load())
+                return;
+            seed = timelapse_packets_.at(camera);
+        }
+
+        FragmentedMp4Writer writer;
+        std::string error;
+        struct StreamOutputState {
+            std::vector<std::uint8_t> initialization;
+            bool initialized = false;
+        };
+        const auto output_state = std::make_shared<StreamOutputState>();
+        const VideoEncodeOptions mux_options{
+            .quality = 0,
+            .bitrate = 0,
+            .codec = "copy",
+            .encoder = {},
+            .keyframe_interval = 10,
+            .low_latency = false,
+            .fragment_every_frame = true,
+        };
+        if (!writer.open(
+                seed.packet.stream(), mux_options,
+                [this, fd = client->fd, output_state](const std::uint8_t* bytes, std::size_t size) {
+                    if (!output_state->initialized) {
+                        output_state->initialization.insert(output_state->initialization.end(),
+                                                            bytes, bytes + size);
+                        return true;
+                    }
+                    return send_all(fd, bytes, size);
+                },
+                &error)) {
+            (void)send_text(client->fd, 503, "Service Unavailable", "text/plain", error + "\n");
+            return;
+        }
+        const std::string headers =
+            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n";
+        if (!send_all(client->fd, headers.data(), headers.size()) ||
+            !send_all(client->fd, output_state->initialization.data(),
+                      output_state->initialization.size()))
+            return;
+        output_state->initialized = true;
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            ++timelapse_stream_clients_[camera];
+        }
+
+        std::uint64_t delivered = seed.version;
+        bool started = false;
+        while (running_.load() && error.empty()) {
+            PublishedVideoPacket next;
+            {
+                std::unique_lock<std::mutex> lock(frames_mutex_);
+                frames_changed_.wait(lock, [&] {
+                    const auto found = timelapse_packets_.find(camera);
+                    return !running_.load() ||
+                           (found != timelapse_packets_.end() && found->second.version > delivered);
+                });
+                if (!running_.load())
+                    break;
+                next = timelapse_packets_.at(camera);
+            }
+            delivered = next.version;
+            if (!started && !next.packet.keyframe())
+                continue;
+            if (!writer.write(next.packet, &error))
+                break;
+            started = true;
+        }
+        writer.close(nullptr);
+        {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            const auto found = timelapse_stream_clients_.find(camera);
+            if (found != timelapse_stream_clients_.end() && --found->second == 0)
+                timelapse_stream_clients_.erase(found);
+        }
         return;
     }
     if (action == "/video.mp4" || action == "/hevc.mp4") {

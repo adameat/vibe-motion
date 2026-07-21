@@ -53,7 +53,10 @@ successfully. Network URLs are redacted from logs and config dumps.
 
 The web listener serves a small status page and JSON status plus Motion-style
 MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
-Motion web control actions and database features are out of scope.
+Motion web control actions and database features are out of scope. The
+`/<camera>/timelapse.mp4` route mirrors packets from the active timelapse
+encoder without another camera connection or encode; a new client waits for
+the next timelapse keyframe before receiving media packets.
 
 ## ONVIF cameras
 

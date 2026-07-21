@@ -58,9 +58,13 @@ class HttpServer {
     // client can attach at the latest keyframe without reconnecting the camera.
     void publish_video(std::string camera_id, const VideoPacket& packet,
                        const VideoEncodeOptions& options = {});
+    // Retains only the latest already-encoded timelapse packet. New clients
+    // deliberately wait for a keyframe published after they connect.
+    void publish_timelapse_video(std::string camera_id, const VideoPacket& packet);
     PublishedJpeg latest(const std::string& camera_id) const;
     bool has_stream_clients(const std::string& camera_id) const;
     bool has_video_stream_clients(const std::string& camera_id) const;
+    bool has_timelapse_stream_clients(const std::string& camera_id) const;
     bool wants_jpeg(const std::string& camera_id) const;
 
   private:
@@ -93,6 +97,8 @@ class HttpServer {
     std::unordered_map<std::string, std::deque<PublishedVideoPacket>> video_packets_;
     std::unordered_map<std::string, VideoEncodeOptions> video_options_;
     std::unordered_map<std::string, std::size_t> video_stream_clients_;
+    std::unordered_map<std::string, PublishedVideoPacket> timelapse_packets_;
+    std::unordered_map<std::string, std::size_t> timelapse_stream_clients_;
     std::uint64_t next_version_ = 1;
 
     mutable std::mutex clients_mutex_;

@@ -38,6 +38,7 @@ class StreamInfo {
     friend class NetworkCameraSource;
     friend class EventMovieWriter;
     friend class FragmentedMp4Writer;
+    friend class TimelapseWriter;
     friend struct PacketTranscoder;
     friend class VideoPacket;
 };
@@ -67,6 +68,7 @@ class VideoPacket {
     friend class NetworkCameraSource;
     friend class EventMovieWriter;
     friend class FragmentedMp4Writer;
+    friend class TimelapseWriter;
     friend struct PacketTranscoder;
 };
 
@@ -203,6 +205,8 @@ struct VideoEncodeOptions {
     int keyframe_interval = 10;
     // Web streaming favors bounded latency over encoder efficiency.
     bool low_latency = false;
+    // Emit a separate fragmented-MP4 fragment for every encoded packet.
+    bool fragment_every_frame = false;
 };
 
 using TimelapseEncodeOptions = VideoEncodeOptions;
@@ -234,6 +238,8 @@ class FragmentedMp4Writer {
 
 class TimelapseWriter {
   public:
+    using PacketCallback = std::function<void(const VideoPacket&)>;
+
     TimelapseWriter();
     ~TimelapseWriter();
     TimelapseWriter(const TimelapseWriter&) = delete;
@@ -247,6 +253,9 @@ class TimelapseWriter {
     bool open(const std::string& path, int width, int height, int fps,
               const TimelapseEncodeOptions& options, std::string* error = nullptr);
     bool write(const DecodedImage& image, std::string* error = nullptr);
+    // Mirrors packets already produced by the timelapse encoder; it does not
+    // create another encoder or camera connection.
+    void set_packet_callback(PacketCallback callback);
     bool close(std::string* error = nullptr) noexcept;
     bool is_open() const noexcept;
 

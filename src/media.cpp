@@ -1317,6 +1317,7 @@ struct FragmentedMp4Writer::Impl {
     WriteCallback output;
     bool header_written = false;
     bool wrote_packet = false;
+    bool flush_each_packet = false;
     std::int64_t base_dts = AV_NOPTS_VALUE;
     std::int64_t last_dts = AV_NOPTS_VALUE;
     std::unique_ptr<PacketTranscoder> transcoder;
@@ -1345,8 +1346,12 @@ struct FragmentedMp4Writer::Impl {
     bool write(const VideoPacket& input, std::string* error) {
         if (format == nullptr || !input.valid())
             return format != nullptr;
-        if (transcoder)
-            return transcoder->write(input, error);
+        if (transcoder) {
+            const bool success = transcoder->write(input, error);
+            if (success && flush_each_packet && format->pb != nullptr)
+                avio_flush(format->pb);
+            return success;
+        }
         if (!codec_matches(input.stream().impl_->parameters->codec_id, source.codec_name())) {
             set_error(error, "web stream packet codec changed");
             return false;
@@ -1380,6 +1385,8 @@ struct FragmentedMp4Writer::Impl {
             set_error(error, "cannot write fragmented MP4 packet: " + ff_error(result));
             return false;
         }
+        if (flush_each_packet && format->pb != nullptr)
+            avio_flush(format->pb);
         wrote_packet = true;
         return true;
     }
@@ -1415,6 +1422,7 @@ struct FragmentedMp4Writer::Impl {
         output = {};
         header_written = false;
         wrote_packet = false;
+        flush_each_packet = false;
         base_dts = last_dts = AV_NOPTS_VALUE;
         transcoder.reset();
         return success;
@@ -1458,6 +1466,7 @@ bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOption
     }
     impl_->format->pb = impl_->io;
     impl_->format->flags |= AVFMT_FLAG_CUSTOM_IO | AVFMT_FLAG_FLUSH_PACKETS;
+    impl_->flush_each_packet = options.fragment_every_frame;
     if (codec == "copy") {
         impl_->output_stream = avformat_new_stream(impl_->format, nullptr);
         result =
@@ -1481,7 +1490,10 @@ bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOption
             mp4_codec_tag(impl_->output_stream->codecpar->codec_id);
     }
     AVDictionary* muxer_options = nullptr;
-    av_dict_set(&muxer_options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+    av_dict_set(&muxer_options, "movflags",
+                options.fragment_every_frame ? "frag_every_frame+empty_moov+default_base_moof"
+                                             : "frag_keyframe+empty_moov+default_base_moof",
+                0);
     impl_->output = std::move(output);
     if (result >= 0)
         result = avformat_write_header(impl_->format, &muxer_options);
@@ -1512,6 +1524,8 @@ struct TimelapseWriter::Impl {
     CodecPtr encoder;
     FramePtr encoded_frame;
     SwsContext* scaler = nullptr;
+    StreamInfo packet_stream;
+    TimelapseWriter::PacketCallback packet_callback;
     std::int64_t next_pts = 0;
     bool header_written = false;
 
@@ -1534,16 +1548,32 @@ struct TimelapseWriter::Impl {
                 set_error(error, "cannot encode timelapse frame: " + ff_error(result));
                 return false;
             }
-            av_packet_rescale_ts(packet.get(), encoder->time_base, stream->time_base);
             if (packet->duration <= 0) {
-                packet->duration = av_rescale_q(1, encoder->time_base, stream->time_base);
+                packet->duration = 1;
             }
+            VideoPacket published;
+            if (packet_callback && packet_stream.valid()) {
+                auto copy = std::make_unique<VideoPacket::Impl>();
+                if (copy->packet && av_packet_ref(copy->packet.get(), packet.get()) >= 0) {
+                    copy->stream = packet_stream;
+                    copy->received = std::chrono::steady_clock::now();
+                    published = VideoPacket(std::move(copy));
+                }
+            }
+            av_packet_rescale_ts(packet.get(), encoder->time_base, stream->time_base);
             packet->stream_index = stream->index;
             const int write_result = av_interleaved_write_frame(format, packet.get());
             av_packet_unref(packet.get());
             if (write_result < 0) {
                 set_error(error, "cannot write timelapse packet: " + ff_error(write_result));
                 return false;
+            }
+            if (published.valid()) {
+                try {
+                    packet_callback(published);
+                } catch (...) {
+                    // A web client must never interrupt the on-disk timelapse.
+                }
             }
         }
     }
@@ -1580,6 +1610,7 @@ struct TimelapseWriter::Impl {
         encoder.reset();
         format = nullptr;
         stream = nullptr;
+        packet_stream = {};
         next_pts = 0;
         header_written = false;
         return success;
@@ -1671,6 +1702,17 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     if (result >= 0) {
         result = avcodec_parameters_from_context(impl_->stream->codecpar, impl_->encoder.get());
     }
+    if (result >= 0) {
+        auto packet_stream = std::make_shared<StreamInfo::Impl>();
+        result = packet_stream->parameters == nullptr
+                     ? AVERROR(ENOMEM)
+                     : avcodec_parameters_copy(packet_stream->parameters, impl_->stream->codecpar);
+        if (result >= 0) {
+            packet_stream->time_base = impl_->encoder->time_base;
+            packet_stream->frame_rate = impl_->encoder->framerate;
+            impl_->packet_stream = StreamInfo(std::move(packet_stream));
+        }
+    }
     if (result < 0 || !allocate_video_frame(impl_->encoded_frame.get(), impl_->encoder->pix_fmt,
                                             width, height, error)) {
         if (result < 0) {
@@ -1740,6 +1782,9 @@ bool TimelapseWriter::write(const DecodedImage& image, std::string* error) {
         return false;
     }
     return impl_->drain(error);
+}
+void TimelapseWriter::set_packet_callback(PacketCallback callback) {
+    impl_->packet_callback = std::move(callback);
 }
 bool TimelapseWriter::close(std::string* error) noexcept {
     return impl_->close(error);
