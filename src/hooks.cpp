@@ -531,7 +531,10 @@ bool HookExecutor::coalesce_pending(Job& replacement) {
             result.exec_errno = ECANCELED;
             completions_.emplace_back(std::move(found->completion), std::move(result));
         }
-        *found = std::move(replacement);
+        queue.erase(found);
+        std::deque<Job>& replacement_queue =
+            replacement.options.priority == HookPriority::critical ? critical_jobs_ : jobs_;
+        replacement_queue.push_back(std::move(replacement));
         ++coalesced_;
         return true;
     };

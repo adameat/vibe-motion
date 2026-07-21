@@ -149,6 +149,28 @@ void test_snapshot_coalescing_and_event_priority(const std::filesystem::path& su
     assert(status.coalesced == 1 && status.dropped == 1);
 }
 
+void test_coalescing_moves_replacement_to_priority_queue(const std::filesystem::path& supervisor) {
+    const auto output = std::filesystem::temp_directory_path() /
+                        ("vibe-motion-hook-reprioritize-" + std::to_string(::getpid()));
+    std::filesystem::remove(output);
+    HookExecutor executor(options(supervisor, 1, 4));
+    const auto append = [&](const std::string& value) {
+        return std::vector<std::string>{"/bin/sh", "-c",
+                                        "printf '" + value + "' >> '" + output.string() + "'"};
+    };
+    assert(executor.submit(std::vector<std::string>{
+        "/bin/sh", "-c", "printf 'B' >> '" + output.string() + "'; sleep 0.2"}));
+    assert(wait_until([&] { return executor.running() == 1; }));
+    assert(executor.submit(append("O")));
+    assert(executor.submit(append("N"), {.coalesce_key = "reprioritize"}));
+    assert(executor.submit(append("C"),
+                           {.priority = HookPriority::critical, .coalesce_key = "reprioritize"}));
+    assert(executor.wait_idle(5s));
+    assert(read_file(output) == "BCO");
+    std::filesystem::remove(output);
+    assert(executor.status().coalesced == 1);
+}
+
 void test_timeout_and_forced_kill(const std::filesystem::path& supervisor) {
     HookResult completion;
     HookExecutor executor(options(supervisor, 1, 4, 100ms, 50ms));
@@ -275,6 +297,7 @@ int main(int argc, char** argv) {
     test_persistent_named_supervisor(supervisor);
     test_queue_drains_after_saturation(supervisor);
     test_snapshot_coalescing_and_event_priority(supervisor);
+    test_coalescing_moves_replacement_to_priority_queue(supervisor);
     test_timeout_and_forced_kill(supervisor);
     test_exec_failure(supervisor);
     test_supervisor_failure_recovers(supervisor);
