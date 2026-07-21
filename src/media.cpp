@@ -973,6 +973,7 @@ struct PacketTranscoder {
             return false;
         }
         output_stream->time_base = encoder_time_base;
+        output_stream->avg_frame_rate = frame_rate;
         output_stream->codecpar->codec_tag = 0;
         return true;
     }
@@ -991,6 +992,10 @@ struct PacketTranscoder {
                 set_error(error, "cannot receive transcoded packet: " + ff_error(result));
                 return false;
             }
+            // Older MP4 muxers can mark the final zero-duration packet as
+            // discard when no following DTS is available to infer its span.
+            if (packet->duration <= 0)
+                packet->duration = 1;
             av_packet_rescale_ts(packet.get(), encoder->time_base, output_stream->time_base);
             packet->stream_index = output_stream->index;
             packet->pos = -1;
