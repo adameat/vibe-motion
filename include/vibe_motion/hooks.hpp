@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <sys/types.h>
 #include <thread>
@@ -44,6 +45,9 @@ struct HookSubmitOptions {
     HookPriority priority = HookPriority::normal;
     std::string kind = "hook";
     int camera_id = 0;
+    // Jobs with the same non-empty key never overlap. Queue priority is unchanged,
+    // while jobs with other keys may bypass blocked work to use available concurrency.
+    std::string serial_key;
     // Pending work with the same key is replaced by the newest submission.
     // Running jobs are never replaced.
     std::string coalesce_key;
@@ -135,7 +139,7 @@ class HookExecutor {
     void reap_supervisor_nonblocking() noexcept;
     void stop_supervisor() noexcept;
     std::size_t pending_unlocked() const noexcept;
-    Job pop_next_job();
+    std::optional<Job> pop_next_job();
     bool coalesce_pending(Job& replacement);
     bool evict_coalescible_job();
     void complete_job(Job job, int error);

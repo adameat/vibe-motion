@@ -226,12 +226,87 @@ bool decoded_frame_usable(const AVFrame* frame) noexcept {
     return (frame->flags & rejected_flags) == 0 && frame->decode_error_flags == 0;
 }
 
+void PacketTimestampNormalizer::reset(std::int64_t ticks_per_second,
+                                      bool repair_from_arrival) noexcept {
+    ticks_per_second_ = std::max<std::int64_t>(ticks_per_second, 1);
+    first_input_.reset();
+    last_input_.reset();
+    first_arrival_ = 0;
+    last_arrival_ = 0;
+    last_output_ = 0;
+    repair_from_arrival_ = repair_from_arrival;
+    initialized_ = false;
+}
+
+std::int64_t PacketTimestampNormalizer::normalize(std::optional<std::int64_t> input_timestamp,
+                                                  std::int64_t arrival_timestamp) noexcept {
+    if (!initialized_) {
+        first_input_ = input_timestamp;
+        last_input_ = input_timestamp;
+        first_arrival_ = arrival_timestamp;
+        last_arrival_ = arrival_timestamp;
+        last_output_ = 0;
+        initialized_ = true;
+        return 0;
+    }
+
+    if (!repair_from_arrival_) {
+        std::int64_t output = last_output_ + 1;
+        if (input_timestamp) {
+            if (!first_input_)
+                first_input_ = input_timestamp;
+            output = std::max<std::int64_t>(*input_timestamp - *first_input_, output);
+        }
+        last_input_ = input_timestamp;
+        last_arrival_ = arrival_timestamp;
+        last_output_ = output;
+        return last_output_;
+    }
+
+    // Some RTSP cameras reset or jump their RTP-derived DTS while continuing to
+    // deliver packets normally. Preserve plausible source deltas, but use the
+    // monotonic packet-arrival clock when the source timeline diverges sharply.
+    const std::int64_t arrival_delta = std::max<std::int64_t>(arrival_timestamp - last_arrival_, 1);
+    std::int64_t output_delta = arrival_delta;
+    if (input_timestamp && last_input_) {
+        const std::int64_t input_delta = *input_timestamp - *last_input_;
+        const std::int64_t minimum_plausible =
+            arrival_delta >= std::max<std::int64_t>(ticks_per_second_ / 100, 1)
+                ? std::max<std::int64_t>(arrival_delta / 4, 1)
+                : 1;
+        const std::int64_t maximum_plausible =
+            std::max<std::int64_t>(ticks_per_second_ * 2, arrival_delta * 4);
+        if (input_delta >= minimum_plausible && input_delta <= maximum_plausible) {
+            output_delta = input_delta;
+        }
+    }
+
+    // A sequence of individually plausible deltas can still make a broken RTP
+    // clock run much faster or slower than wall time. Keep source timing for
+    // ordinary jitter, but bound cumulative skew so a short capture cannot
+    // acquire long frozen sections.
+    const std::int64_t arrival_elapsed =
+        std::max<std::int64_t>(arrival_timestamp - first_arrival_, 0);
+    const std::int64_t skew_allowance = ticks_per_second_ * 2;
+    const std::int64_t lower_bound = std::max<std::int64_t>(
+        last_output_ + 1, arrival_elapsed > skew_allowance ? arrival_elapsed - skew_allowance : 0);
+    const std::int64_t upper_bound =
+        std::max<std::int64_t>(lower_bound, arrival_elapsed + skew_allowance);
+    output_delta = std::clamp(last_output_ + output_delta, lower_bound, upper_bound) - last_output_;
+
+    last_input_ = input_timestamp;
+    last_arrival_ = arrival_timestamp;
+    last_output_ += output_delta;
+    return last_output_;
+}
+
 } // namespace detail
 
 struct StreamInfo::Impl {
     AVCodecParameters* parameters = nullptr;
     AVRational time_base{0, 1};
     AVRational frame_rate{0, 1};
+    bool repair_timestamps_from_arrival = true;
 
     Impl() : parameters(avcodec_parameters_alloc()) {}
     ~Impl() {
@@ -1125,10 +1200,8 @@ struct EventMovieWriter::Impl {
     AVStream* output_stream = nullptr;
     StreamInfo source;
     bool header_written = false;
-    bool timestamp_base_set = false;
-    std::int64_t base_dts = AV_NOPTS_VALUE;
-    std::int64_t last_dts = AV_NOPTS_VALUE;
     bool wrote_packet = false;
+    detail::PacketTimestampNormalizer timestamps;
     std::unique_ptr<PacketTranscoder> transcoder;
 
     ~Impl() {
@@ -1164,30 +1237,27 @@ struct EventMovieWriter::Impl {
             set_error(error, "cannot clone movie packet");
             return false;
         }
-        if (!timestamp_base_set) {
-            base_dts = packet->dts;
-            if (base_dts == AV_NOPTS_VALUE) {
-                base_dts = packet->pts;
-            }
-            timestamp_base_set = true;
-        }
-        if (packet->dts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE) {
-            packet->dts -= base_dts;
-        }
-        if (packet->pts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE) {
-            packet->pts -= base_dts;
-        }
+        const std::int64_t source_pts_delta =
+            packet->pts != AV_NOPTS_VALUE && packet->dts != AV_NOPTS_VALUE
+                ? packet->pts - packet->dts
+                : 0;
         av_packet_rescale_ts(packet.get(), source.impl_->time_base, output_stream->time_base);
-        if (packet->dts == AV_NOPTS_VALUE) {
-            packet->dts = last_dts == AV_NOPTS_VALUE ? 0 : last_dts + 1;
-        }
-        if (last_dts != AV_NOPTS_VALUE && packet->dts <= last_dts) {
-            packet->dts = last_dts + 1;
-        }
-        if (packet->pts == AV_NOPTS_VALUE || packet->pts < packet->dts) {
-            packet->pts = packet->dts;
-        }
-        last_dts = packet->dts;
+        const auto input_dts =
+            packet->dts != AV_NOPTS_VALUE
+                ? std::optional<std::int64_t>{packet->dts}
+                : (packet->pts != AV_NOPTS_VALUE ? std::optional<std::int64_t>{packet->pts}
+                                                 : std::nullopt);
+        const auto arrival_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    input.received_at().time_since_epoch())
+                                    .count();
+        const auto arrival_timestamp =
+            av_rescale_q(arrival_us, AVRational{1, 1000000}, output_stream->time_base);
+        packet->dts = timestamps.normalize(input_dts, arrival_timestamp);
+        const auto pts_delta =
+            source_pts_delta > 0
+                ? av_rescale_q(source_pts_delta, source.impl_->time_base, output_stream->time_base)
+                : 0;
+        packet->pts = packet->dts + std::max<std::int64_t>(pts_delta, 0);
         packet->stream_index = output_stream->index;
         packet->pos = -1;
         const int result = av_interleaved_write_frame(format, packet.get());
@@ -1228,9 +1298,8 @@ struct EventMovieWriter::Impl {
         output_stream = nullptr;
         source = StreamInfo{};
         header_written = false;
-        timestamp_base_set = false;
-        base_dts = last_dts = AV_NOPTS_VALUE;
         wrote_packet = false;
+        timestamps.reset(1);
         transcoder.reset();
         return success;
     }
@@ -1319,6 +1388,7 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
     }
     impl_->header_written = true;
     impl_->source = stream;
+    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base));
     return true;
 }
 bool EventMovieWriter::write_preroll(const PacketRing& ring, std::string* error) {
@@ -1348,8 +1418,7 @@ struct FragmentedMp4Writer::Impl {
     bool header_written = false;
     bool wrote_packet = false;
     bool flush_each_packet = false;
-    std::int64_t base_dts = AV_NOPTS_VALUE;
-    std::int64_t last_dts = AV_NOPTS_VALUE;
+    detail::PacketTimestampNormalizer timestamps;
     std::unique_ptr<PacketTranscoder> transcoder;
 
     ~Impl() {
@@ -1393,21 +1462,27 @@ struct FragmentedMp4Writer::Impl {
             set_error(error, "cannot clone web stream packet");
             return false;
         }
-        if (!wrote_packet) {
-            base_dts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
-        }
-        if (packet->dts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE)
-            packet->dts -= base_dts;
-        if (packet->pts != AV_NOPTS_VALUE && base_dts != AV_NOPTS_VALUE)
-            packet->pts -= base_dts;
+        const std::int64_t source_pts_delta =
+            packet->pts != AV_NOPTS_VALUE && packet->dts != AV_NOPTS_VALUE
+                ? packet->pts - packet->dts
+                : 0;
         av_packet_rescale_ts(packet.get(), source.impl_->time_base, output_stream->time_base);
-        if (packet->dts == AV_NOPTS_VALUE)
-            packet->dts = last_dts == AV_NOPTS_VALUE ? 0 : last_dts + 1;
-        if (last_dts != AV_NOPTS_VALUE && packet->dts <= last_dts)
-            packet->dts = last_dts + 1;
-        if (packet->pts == AV_NOPTS_VALUE || packet->pts < packet->dts)
-            packet->pts = packet->dts;
-        last_dts = packet->dts;
+        const auto input_dts =
+            packet->dts != AV_NOPTS_VALUE
+                ? std::optional<std::int64_t>{packet->dts}
+                : (packet->pts != AV_NOPTS_VALUE ? std::optional<std::int64_t>{packet->pts}
+                                                 : std::nullopt);
+        const auto arrival_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    input.received_at().time_since_epoch())
+                                    .count();
+        const auto arrival_timestamp =
+            av_rescale_q(arrival_us, AVRational{1, 1000000}, output_stream->time_base);
+        packet->dts = timestamps.normalize(input_dts, arrival_timestamp);
+        const auto pts_delta =
+            source_pts_delta > 0
+                ? av_rescale_q(source_pts_delta, source.impl_->time_base, output_stream->time_base)
+                : 0;
+        packet->pts = packet->dts + std::max<std::int64_t>(pts_delta, 0);
         packet->stream_index = output_stream->index;
         packet->pos = -1;
         const int result = av_interleaved_write_frame(format, packet.get());
@@ -1453,7 +1528,7 @@ struct FragmentedMp4Writer::Impl {
         header_written = false;
         wrote_packet = false;
         flush_each_packet = false;
-        base_dts = last_dts = AV_NOPTS_VALUE;
+        timestamps.reset(1);
         transcoder.reset();
         return success;
     }
@@ -1536,6 +1611,8 @@ bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOption
     }
     impl_->source = stream;
     impl_->header_written = true;
+    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base),
+                            impl_->source.impl_->repair_timestamps_from_arrival);
     return true;
 }
 bool FragmentedMp4Writer::write(const VideoPacket& packet, std::string* error) {
@@ -1740,6 +1817,7 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         if (result >= 0) {
             packet_stream->time_base = impl_->encoder->time_base;
             packet_stream->frame_rate = impl_->encoder->framerate;
+            packet_stream->repair_timestamps_from_arrival = false;
             impl_->packet_stream = StreamInfo(std::move(packet_stream));
         }
     }

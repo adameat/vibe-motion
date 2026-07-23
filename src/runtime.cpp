@@ -495,10 +495,12 @@ class CameraWorker {
             for (auto& argument : argv) {
                 argument = expand_template(argument, values, when);
             }
-            if (!hooks_.submit(std::move(argv), {.priority = priority,
-                                                 .kind = kind,
-                                                 .camera_id = config_.camera_id,
-                                                 .coalesce_key = std::move(coalesce_key)})) {
+            if (!hooks_.submit(std::move(argv),
+                               {.priority = priority,
+                                .kind = kind,
+                                .camera_id = config_.camera_id,
+                                .serial_key = "camera:" + std::to_string(config_.camera_id),
+                                .coalesce_key = std::move(coalesce_key)})) {
                 const auto status = hooks_.status();
                 Logger::instance().write(
                     LogLevel::warning, "camera ", config_.camera_id, ": hook dropped kind=", kind,
@@ -546,34 +548,43 @@ class CameraWorker {
                                       : best_frame.captured_at;
         const auto end_when = std::chrono::system_clock::now();
         auto values = context(best_detection, best_frame, event_number);
+        std::optional<ExpansionContext> picture_values;
         if (config_.picture_output && !best_jpeg.empty()) {
             const auto picture =
                 output_path(config_.picture_filename, ".jpg", values, picture_when);
             try {
                 write_atomic(picture, best_jpeg);
-                values.filename = picture.string();
-                values.file_type = "picture";
-                hook(config_.on_picture_save, values, picture_when, "event-picture",
-                     HookPriority::critical);
+                picture_values = values;
+                picture_values->filename = picture.string();
+                picture_values->file_type = "picture";
             } catch (const std::exception& error) {
                 Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
                                          ": picture write failed: ", error.what());
             }
         }
-        values.filename.clear();
-        values.file_type.clear();
-        hook(config_.on_event_end, values, end_when, "event-end", HookPriority::critical);
+        std::optional<ExpansionContext> movie_values;
         if (movie.is_open()) {
             std::string error;
             movie.close(&error);
-            values.filename = movie_path.string();
-            values.file_type = "movie";
-            hook(config_.on_movie_end, values, end_when, "movie-end", HookPriority::critical);
+            movie_values = values;
+            movie_values->filename = movie_path.string();
+            movie_values->file_type = "movie";
             if (!error.empty()) {
                 set_status([&](WorkerStatus& state) { state.movie_error = redact_secrets(error); });
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": movie finalize: ", redact_secrets(error));
             }
+        }
+        values.filename.clear();
+        values.file_type.clear();
+        hook(config_.on_event_end, values, end_when, "event-end", HookPriority::critical);
+        if (picture_values) {
+            hook(config_.on_picture_save, *picture_values, picture_when, "event-picture",
+                 HookPriority::critical);
+        }
+        if (movie_values) {
+            hook(config_.on_movie_end, *movie_values, end_when, "movie-end",
+                 HookPriority::critical);
         }
         movie_path.clear();
         best_jpeg.clear();
@@ -1063,8 +1074,12 @@ class CameraWorker {
                     }
                 }
 
-                if (events.active() && (best_frame.captured_at.time_since_epoch().count() == 0 ||
-                                        detection.changed_pixels > best_detection.changed_pixels)) {
+                const bool missing_event_picture =
+                    best_frame.captured_at.time_since_epoch().count() == 0;
+                const bool better_motion_picture =
+                    config_.motion_detection &&
+                    detection.changed_pixels > best_detection.changed_pixels;
+                if (events.active() && (missing_event_picture || better_motion_picture)) {
                     best_jpeg.clear();
                     const bool draw_redbox = config_.locate_motion_mode == "preview" &&
                                              config_.locate_motion_style == "redbox" &&
