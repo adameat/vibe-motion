@@ -126,18 +126,23 @@ void test_snapshot_coalescing_and_event_priority(const std::filesystem::path& su
     assert(executor.submit(std::vector<std::string>{
         "/bin/sh", "-c", "printf 'B' >> '" + output.string() + "'; sleep 0.2"}));
     assert(wait_until([&] { return executor.running() == 1; }));
-    assert(executor.submit(append("O"),
-                           {.kind = "snapshot", .camera_id = 1, .coalesce_key = "snapshot:1"}));
-    assert(executor.submit(append("N"),
-                           {.kind = "snapshot", .camera_id = 1, .coalesce_key = "snapshot:1"}));
-    assert(executor.submit(append("2"),
-                           {.kind = "snapshot", .camera_id = 2, .coalesce_key = "snapshot:2"}));
-    assert(executor.submit(append("3"),
-                           {.kind = "snapshot", .camera_id = 3, .coalesce_key = "snapshot:3"}));
+    assert(executor.submit(
+        append("O"),
+        {.kind = "snapshot", .camera_id = 1, .serial_key = {}, .coalesce_key = "snapshot:1"}));
+    assert(executor.submit(
+        append("N"),
+        {.kind = "snapshot", .camera_id = 1, .serial_key = {}, .coalesce_key = "snapshot:1"}));
+    assert(executor.submit(
+        append("2"),
+        {.kind = "snapshot", .camera_id = 2, .serial_key = {}, .coalesce_key = "snapshot:2"}));
+    assert(executor.submit(
+        append("3"),
+        {.kind = "snapshot", .camera_id = 3, .serial_key = {}, .coalesce_key = "snapshot:3"}));
     assert(executor.pending() == 3);
     assert(executor.submit(append("C"), {.priority = HookPriority::critical,
                                          .kind = "event-end",
                                          .camera_id = 1,
+                                         .serial_key = {},
                                          .coalesce_key = {}}));
     assert(executor.wait_idle(5s));
     const auto contents = read_file(output);
@@ -162,13 +167,50 @@ void test_coalescing_moves_replacement_to_priority_queue(const std::filesystem::
         "/bin/sh", "-c", "printf 'B' >> '" + output.string() + "'; sleep 0.2"}));
     assert(wait_until([&] { return executor.running() == 1; }));
     assert(executor.submit(append("O")));
-    assert(executor.submit(append("N"), {.coalesce_key = "reprioritize"}));
-    assert(executor.submit(append("C"),
-                           {.priority = HookPriority::critical, .coalesce_key = "reprioritize"}));
+    assert(executor.submit(append("N"), {.serial_key = {}, .coalesce_key = "reprioritize"}));
+    assert(executor.submit(
+        append("C"),
+        {.priority = HookPriority::critical, .serial_key = {}, .coalesce_key = "reprioritize"}));
     assert(executor.wait_idle(5s));
     assert(read_file(output) == "BCO");
     std::filesystem::remove(output);
     assert(executor.status().coalesced == 1);
+}
+
+void test_serialized_jobs_do_not_overlap(const std::filesystem::path& supervisor) {
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("vibe-motion-hook-serial-" + std::to_string(::getpid()));
+    const auto started = base.string() + "-started";
+    const auto finished = base.string() + "-finished";
+    const auto overlap = base.string() + "-overlap";
+    const auto parallel = base.string() + "-parallel";
+    std::filesystem::remove(started);
+    std::filesystem::remove(finished);
+    std::filesystem::remove(overlap);
+    std::filesystem::remove(parallel);
+
+    HookExecutor executor(options(supervisor, 2, 4));
+    assert(executor.submit(
+        std::vector<std::string>{"/bin/sh", "-c",
+                                 "touch '" + started + "'; sleep 0.2; touch '" + finished + "'"},
+        {.serial_key = "camera:1", .coalesce_key = {}}));
+    assert(wait_until([&] { return std::filesystem::exists(started); }));
+    assert(executor.submit(
+        std::vector<std::string>{"/bin/sh", "-c",
+                                 "test -e '" + finished + "' || touch '" + overlap + "'"},
+        {.serial_key = "camera:1", .coalesce_key = {}}));
+    assert(executor.submit(std::vector<std::string>{"/usr/bin/touch", parallel},
+                           {.serial_key = "camera:2", .coalesce_key = {}}));
+    assert(wait_until([&] { return std::filesystem::exists(parallel); }));
+    assert(!std::filesystem::exists(overlap));
+    assert(executor.wait_idle(5s));
+    assert(std::filesystem::exists(finished));
+    assert(!std::filesystem::exists(overlap));
+
+    std::filesystem::remove(started);
+    std::filesystem::remove(finished);
+    std::filesystem::remove(overlap);
+    std::filesystem::remove(parallel);
 }
 
 void test_timeout_and_forced_kill(const std::filesystem::path& supervisor) {
@@ -298,6 +340,7 @@ int main(int argc, char** argv) {
     test_queue_drains_after_saturation(supervisor);
     test_snapshot_coalescing_and_event_priority(supervisor);
     test_coalescing_moves_replacement_to_priority_queue(supervisor);
+    test_serialized_jobs_do_not_overlap(supervisor);
     test_timeout_and_forced_kill(supervisor);
     test_exec_failure(supervisor);
     test_supervisor_failure_recovers(supervisor);

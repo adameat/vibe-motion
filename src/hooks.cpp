@@ -507,11 +507,26 @@ std::size_t HookExecutor::pending_unlocked() const noexcept {
     return critical_jobs_.size() + jobs_.size();
 }
 
-HookExecutor::Job HookExecutor::pop_next_job() {
-    std::deque<Job>& queue = critical_jobs_.empty() ? jobs_ : critical_jobs_;
-    Job job = std::move(queue.front());
-    queue.pop_front();
-    return job;
+std::optional<HookExecutor::Job> HookExecutor::pop_next_job() {
+    const auto runnable = [&](const Job& candidate) {
+        return candidate.options.serial_key.empty() ||
+               std::none_of(children_.begin(), children_.end(), [&](const Child& child) {
+                   return child.job.options.serial_key == candidate.options.serial_key;
+               });
+    };
+    const auto pop_runnable = [&](std::deque<Job>& queue) -> std::optional<Job> {
+        const auto found = std::find_if(queue.begin(), queue.end(), runnable);
+        if (found == queue.end()) {
+            return std::nullopt;
+        }
+        Job job = std::move(*found);
+        queue.erase(found);
+        return job;
+    };
+    if (auto job = pop_runnable(critical_jobs_)) {
+        return job;
+    }
+    return pop_runnable(jobs_);
 }
 
 bool HookExecutor::coalesce_pending(Job& replacement) {
@@ -776,7 +791,11 @@ void HookExecutor::run() {
         }
         while (!stopping_ && !supervisor_failed_ && pending_unlocked() > 0 &&
                children_.size() < options_.max_concurrent) {
-            Job job = pop_next_job();
+            auto next_job = pop_next_job();
+            if (!next_job) {
+                break;
+            }
+            Job job = std::move(*next_job);
             if (!launch(job)) {
                 if (job.options.priority == HookPriority::critical) {
                     critical_jobs_.push_front(std::move(job));

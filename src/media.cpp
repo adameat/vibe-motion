@@ -229,6 +229,7 @@ bool decoded_frame_usable(const AVFrame* frame) noexcept {
 void PacketTimestampNormalizer::reset(std::int64_t ticks_per_second) noexcept {
     ticks_per_second_ = std::max<std::int64_t>(ticks_per_second, 1);
     last_input_.reset();
+    first_arrival_ = 0;
     last_arrival_ = 0;
     last_output_ = 0;
     initialized_ = false;
@@ -238,6 +239,7 @@ std::int64_t PacketTimestampNormalizer::normalize(std::optional<std::int64_t> in
                                                   std::int64_t arrival_timestamp) noexcept {
     if (!initialized_) {
         last_input_ = input_timestamp;
+        first_arrival_ = arrival_timestamp;
         last_arrival_ = arrival_timestamp;
         last_output_ = 0;
         initialized_ = true;
@@ -261,6 +263,19 @@ std::int64_t PacketTimestampNormalizer::normalize(std::optional<std::int64_t> in
             output_delta = input_delta;
         }
     }
+
+    // A sequence of individually plausible deltas can still make a broken RTP
+    // clock run much faster or slower than wall time. Keep source timing for
+    // ordinary jitter, but bound cumulative skew so a short capture cannot
+    // acquire long frozen sections.
+    const std::int64_t arrival_elapsed =
+        std::max<std::int64_t>(arrival_timestamp - first_arrival_, 0);
+    const std::int64_t skew_allowance = ticks_per_second_ * 2;
+    const std::int64_t lower_bound = std::max<std::int64_t>(
+        last_output_ + 1, arrival_elapsed > skew_allowance ? arrival_elapsed - skew_allowance : 0);
+    const std::int64_t upper_bound =
+        std::max<std::int64_t>(lower_bound, arrival_elapsed + skew_allowance);
+    output_delta = std::clamp(last_output_ + output_delta, lower_bound, upper_bound) - last_output_;
 
     last_input_ = input_timestamp;
     last_arrival_ = arrival_timestamp;

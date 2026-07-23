@@ -18,6 +18,7 @@ class PacketTimestampNormalizer {
   private:
     std::int64_t ticks_per_second_ = 1;
     std::optional<std::int64_t> last_input_;
+    std::int64_t first_arrival_ = 0;
     std::int64_t last_arrival_ = 0;
     std::int64_t last_output_ = 0;
     bool initialized_ = false;

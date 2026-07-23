@@ -73,6 +73,14 @@ static void test_packet_timestamp_normalization() {
     assert(timestamps.normalize(0, 0) == 0);
     assert(timestamps.normalize(1, 30000) == 30000);
     assert(timestamps.normalize(std::nullopt, 60000) == 60000);
+
+    // Individually plausible source deltas must not accumulate into a timeline
+    // that is many seconds ahead of packet arrival.
+    timestamps.reset(90000);
+    assert(timestamps.normalize(0, 0) == 0);
+    assert(timestamps.normalize(360000, 90000) == 270000);
+    assert(timestamps.normalize(720000, 180000) == 360000);
+    assert(timestamps.normalize(1080000, 270000) == 450000);
 }
 
 struct DecodedVideoStats {
