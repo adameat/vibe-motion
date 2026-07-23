@@ -45,8 +45,8 @@ struct HookSubmitOptions {
     HookPriority priority = HookPriority::normal;
     std::string kind = "hook";
     int camera_id = 0;
-    // Jobs with the same non-empty key never overlap; FIFO ordering is preserved
-    // within each priority queue. Different keys can still run concurrently.
+    // Jobs with the same non-empty key never overlap. Queue priority is unchanged,
+    // while jobs with other keys may bypass blocked work to use available concurrency.
     std::string serial_key;
     // Pending work with the same key is replaced by the newest submission.
     // Running jobs are never replaced.
