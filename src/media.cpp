@@ -226,24 +226,41 @@ bool decoded_frame_usable(const AVFrame* frame) noexcept {
     return (frame->flags & rejected_flags) == 0 && frame->decode_error_flags == 0;
 }
 
-void PacketTimestampNormalizer::reset(std::int64_t ticks_per_second) noexcept {
+void PacketTimestampNormalizer::reset(std::int64_t ticks_per_second,
+                                      bool repair_from_arrival) noexcept {
     ticks_per_second_ = std::max<std::int64_t>(ticks_per_second, 1);
+    first_input_.reset();
     last_input_.reset();
     first_arrival_ = 0;
     last_arrival_ = 0;
     last_output_ = 0;
+    repair_from_arrival_ = repair_from_arrival;
     initialized_ = false;
 }
 
 std::int64_t PacketTimestampNormalizer::normalize(std::optional<std::int64_t> input_timestamp,
                                                   std::int64_t arrival_timestamp) noexcept {
     if (!initialized_) {
+        first_input_ = input_timestamp;
         last_input_ = input_timestamp;
         first_arrival_ = arrival_timestamp;
         last_arrival_ = arrival_timestamp;
         last_output_ = 0;
         initialized_ = true;
         return 0;
+    }
+
+    if (!repair_from_arrival_) {
+        std::int64_t output = last_output_ + 1;
+        if (input_timestamp) {
+            if (!first_input_)
+                first_input_ = input_timestamp;
+            output = std::max<std::int64_t>(*input_timestamp - *first_input_, output);
+        }
+        last_input_ = input_timestamp;
+        last_arrival_ = arrival_timestamp;
+        last_output_ = output;
+        return last_output_;
     }
 
     // Some RTSP cameras reset or jump their RTP-derived DTS while continuing to
@@ -289,6 +306,7 @@ struct StreamInfo::Impl {
     AVCodecParameters* parameters = nullptr;
     AVRational time_base{0, 1};
     AVRational frame_rate{0, 1};
+    bool repair_timestamps_from_arrival = true;
 
     Impl() : parameters(avcodec_parameters_alloc()) {}
     ~Impl() {
@@ -1593,7 +1611,8 @@ bool FragmentedMp4Writer::open(const StreamInfo& stream, const VideoEncodeOption
     }
     impl_->source = stream;
     impl_->header_written = true;
-    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base));
+    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base),
+                            impl_->source.impl_->repair_timestamps_from_arrival);
     return true;
 }
 bool FragmentedMp4Writer::write(const VideoPacket& packet, std::string* error) {
@@ -1798,6 +1817,7 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         if (result >= 0) {
             packet_stream->time_base = impl_->encoder->time_base;
             packet_stream->frame_rate = impl_->encoder->framerate;
+            packet_stream->repair_timestamps_from_arrival = false;
             impl_->packet_stream = StreamInfo(std::move(packet_stream));
         }
     }

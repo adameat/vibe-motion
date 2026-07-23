@@ -81,6 +81,13 @@ static void test_packet_timestamp_normalization() {
     assert(timestamps.normalize(360000, 90000) == 270000);
     assert(timestamps.normalize(720000, 180000) == 360000);
     assert(timestamps.normalize(1080000, 270000) == 450000);
+
+    // Already-encoded timelapse packets carry a synthetic playback timeline.
+    // Preserve it even when frames arrive minutes apart in wall time.
+    timestamps.reset(90000, false);
+    assert(timestamps.normalize(0, 0) == 0);
+    assert(timestamps.normalize(3000, 5400000) == 3000);
+    assert(timestamps.normalize(6000, 10800000) == 6000);
 }
 
 struct DecodedVideoStats {
