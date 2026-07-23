@@ -50,6 +50,31 @@ static void test_decoded_frame_quality() {
     assert(!detail::decoded_frame_usable(&frame));
 }
 
+static void test_packet_timestamp_normalization() {
+    detail::PacketTimestampNormalizer timestamps;
+    timestamps.reset(90000);
+    assert(timestamps.normalize(0, 0) == 0);
+    assert(timestamps.normalize(3000, 2900) == 3000);
+    assert(timestamps.normalize(6000, 6100) == 6000);
+
+    timestamps.reset(90000);
+    assert(timestamps.normalize(100000, 0) == 0);
+    assert(timestamps.normalize(103000, 3000) == 3000);
+    assert(timestamps.normalize(500, 6000) == 6000);
+    assert(timestamps.normalize(3500, 9000) == 9000);
+
+    timestamps.reset(90000);
+    assert(timestamps.normalize(0, 0) == 0);
+    assert(timestamps.normalize(3000, 3000) == 3000);
+    assert(timestamps.normalize(900000000, 6000) == 6000);
+    assert(timestamps.normalize(900003000, 9000) == 9000);
+
+    timestamps.reset(90000);
+    assert(timestamps.normalize(0, 0) == 0);
+    assert(timestamps.normalize(1, 30000) == 30000);
+    assert(timestamps.normalize(std::nullopt, 60000) == 60000);
+}
+
 struct DecodedVideoStats {
     int frames = 0;
     int keyframes = 0;
@@ -372,6 +397,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
 
 int main(int, char** argv) {
     test_decoded_frame_quality();
+    test_packet_timestamp_normalization();
     assert(normalize_video_codec("H265") == "hevc");
     assert(normalize_video_codec("libx264") == "h264");
     assert(normalize_video_codec("passthrough") == "copy");
