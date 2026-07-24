@@ -15,6 +15,15 @@
 
 namespace vibe_motion {
 
+struct BaichuanSourceConfig {
+    std::string host;
+    int port = 9000;
+    std::string username;
+    std::string password;
+    int channel = 0;
+    std::string stream = "main";
+};
+
 // FFmpeg objects are deliberately hidden from this interface.  This keeps the
 // rest of the daemon independent of FFmpeg headers and makes ownership clear.
 class StreamInfo {
@@ -112,6 +121,7 @@ struct CameraSourceConfig {
     int jpeg_quality = 80; // 1..100; <= 0 disables JPEG generation
     FrameDecodeMode decode_mode = FrameDecodeMode::all;
     std::map<std::string, std::string> options;
+    std::optional<BaichuanSourceConfig> baichuan;
 };
 
 struct CameraSample {

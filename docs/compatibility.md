@@ -9,7 +9,7 @@ is included or copied.
 | Area | Options / behavior |
 | --- | --- |
 | Configuration | ordered `camera` includes, global inheritance, last value wins, quoted values, aliases, unknown-option diagnostics |
-| Sources | RTMP and RTSP, ONVIF Media profile/stream discovery, TCP transport option, input dictionary parameters, timeout and reconnect, full/keyframe/automatic decode modes |
+| Sources | RTMP and RTSP, native Reolink Baichuan main/sub/extern streams, ONVIF Media profile/stream discovery, independent ONVIF events with Baichuan media, TCP transport option, input dictionary parameters, timeout and reconnect, full/keyframe/automatic decode modes |
 | Detection | grayscale background difference, `noise_level`, `noise_tune`, `threshold`, `threshold_tune`, `despeckle_filter`, `lightswitch`, PGM masks, `minimum_motion_frames` |
 | Event lifecycle | local and/or ONVIF PullPoint motion triggers, `event_gap`, compressed pre-capture ring, frame-counted post-capture, `movie_all_frames`, H.264/HEVC passthrough or fixed-codec transcoding, best event JPEG |
 | Files | `%` expansion, snapshots, MP4/MKV passthrough movies, hourly MPEG-4, H.264, or HEVC timelapse in compatible containers, automatic parent directories |
@@ -44,7 +44,10 @@ is included or copied.
 - ONVIF SOAP authentication supports HTTP Digest and WS-Security UsernameToken
   PasswordDigest, with automatic fallback. Event subscriptions are unfiltered
   at the camera and motion topics are filtered locally using
-  `onvif_motion_topics` for better vendor compatibility.
+  `events_topics` for better vendor compatibility.
+- Native Baichuan input uses the built-in C++ TCP transport and `libavutil`
+  primitives for the negotiated control/media encryption. It currently carries
+  video only; ONVIF may remain enabled independently for event notifications.
 
 An excluded option that is active is never silently treated as implemented.
 Config validation reports it, while blank database options and known legacy

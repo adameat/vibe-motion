@@ -2,6 +2,7 @@
 #include "vibe_motion/media.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 
 namespace vibe_motion {
@@ -136,8 +138,21 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         key = "camera_name";
     if (key == "lightswitch")
         key = "lightswitch_percent";
-    if (key == "rtsp_uses_tcp")
-        key = "netcam_use_tcp";
+    constexpr std::array<std::string_view, 16> removed_camera_options{
+        "netcam_url",       "netcam_userpass", "netcam_params", "netcam_use_tcp",
+        "rtsp_uses_tcp",    "baichuan_host",   "baichuan_port", "baichuan_userpass",
+        "baichuan_channel", "baichuan_stream", "onvif_url",     "onvif_userpass",
+        "onvif_profile",    "onvif_auth",      "onvif_events",  "onvif_log_events",
+    };
+    if (std::find(removed_camera_options.begin(), removed_camera_options.end(), original_key) !=
+        removed_camera_options.end()) {
+        throw ConfigError(location + ": removed camera option '" + original_key +
+                          "'; migrate to camera_url/camera_userpass/media_*/events");
+    }
+    if (original_key == "onvif_tls_verify" || original_key == "onvif_motion_topics") {
+        throw ConfigError(location + ": removed camera option '" + original_key +
+                          "'; migrate to camera_tls_verify/events_topics");
+    }
 
     // The distributed Motion configuration keeps device_id/device_name as
     // active-but-empty defaults. An empty id means "not set" and is valid in
@@ -146,30 +161,34 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.camera_id = trim(value).empty() ? 0 : integer(value, location, key);
     else if (key == "camera_name")
         c.camera_name = value;
-    else if (key == "netcam_url")
-        c.netcam_url = value;
-    else if (key == "netcam_userpass")
-        c.netcam_userpass = value;
-    else if (key == "netcam_params")
-        c.netcam_params = value;
-    else if (key == "netcam_use_tcp")
-        c.netcam_use_tcp = boolean(value, location, key);
-    else if (key == "onvif_url")
-        c.onvif_url = value;
-    else if (key == "onvif_userpass")
-        c.onvif_userpass = value;
-    else if (key == "onvif_profile")
-        c.onvif_profile = value;
-    else if (key == "onvif_auth")
-        c.onvif_auth = lower(trim(value));
-    else if (key == "onvif_events")
-        c.onvif_events = boolean(value, location, key);
-    else if (key == "onvif_log_events")
-        c.onvif_log_events = boolean(value, location, key);
-    else if (key == "onvif_tls_verify")
-        c.onvif_tls_verify = boolean(value, location, key);
-    else if (key == "onvif_motion_topics")
-        c.onvif_motion_topics = value;
+    else if (key == "camera_url")
+        c.camera_url = value;
+    else if (key == "camera_userpass")
+        c.camera_userpass = value;
+    else if (key == "camera_auth")
+        c.camera_auth = lower(trim(value));
+    else if (key == "camera_tls_verify")
+        c.camera_tls_verify = boolean(value, location, key);
+    else if (key == "media_transport")
+        c.media_transport = lower(trim(value));
+    else if (key == "media_port")
+        c.media_port = integer(value, location, key);
+    else if (key == "media_channel")
+        c.media_channel = integer(value, location, key);
+    else if (key == "media_stream")
+        c.media_stream = lower(trim(value));
+    else if (key == "media_profile")
+        c.media_profile = value;
+    else if (key == "media_options")
+        c.media_options = value;
+    else if (key == "media_use_tcp")
+        c.media_use_tcp = boolean(value, location, key);
+    else if (key == "events")
+        c.events = boolean(value, location, key);
+    else if (key == "events_log")
+        c.events_log = boolean(value, location, key);
+    else if (key == "events_topics")
+        c.events_topics = value;
     else if (key == "motion_detection")
         c.motion_detection = boolean(value, location, key);
     else if (key == "decode_frames")
@@ -476,28 +495,35 @@ void dump_unknown(std::ostringstream& out, const OptionMap& values, bool redact)
 }
 
 void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
+    const std::string normalized_url = lower(trim(c.camera_url));
+    const bool management_url =
+        normalized_url.rfind("http://", 0) == 0 || normalized_url.rfind("https://", 0) == 0;
+    const bool discovered_dimensions = c.media_transport == "onvif" ||
+                                       c.media_transport == "baichuan" ||
+                                       (c.media_transport == "auto" && management_url);
     out << "camera_id " << c.camera_id << '\n'
         << "camera_name " << c.camera_name << '\n'
-        << "netcam_url " << (redact ? redact_url(c.netcam_url) : c.netcam_url) << '\n'
-        << "netcam_userpass "
-        << (redact && !c.netcam_userpass.empty() ? "REDACTED" : c.netcam_userpass) << '\n'
-        << "netcam_params " << c.netcam_params << '\n'
-        << "netcam_use_tcp " << bool_text(c.netcam_use_tcp) << '\n'
-        << "onvif_url " << (redact ? redact_url(c.onvif_url) : c.onvif_url) << '\n'
-        << "onvif_userpass "
-        << (redact && !c.onvif_userpass.empty() ? "REDACTED" : c.onvif_userpass) << '\n'
-        << "onvif_profile " << c.onvif_profile << '\n'
-        << "onvif_auth " << c.onvif_auth << '\n'
-        << "onvif_events " << bool_text(c.onvif_events) << '\n'
-        << "onvif_log_events " << bool_text(c.onvif_log_events) << '\n'
-        << "onvif_tls_verify " << bool_text(c.onvif_tls_verify) << '\n'
-        << "onvif_motion_topics " << c.onvif_motion_topics << '\n'
+        << "camera_url " << (redact ? redact_url(c.camera_url) : c.camera_url) << '\n'
+        << "camera_userpass "
+        << (redact && !c.camera_userpass.empty() ? "REDACTED" : c.camera_userpass) << '\n'
+        << "camera_auth " << c.camera_auth << '\n'
+        << "camera_tls_verify " << bool_text(c.camera_tls_verify) << '\n'
+        << "media_transport " << c.media_transport << '\n'
+        << "media_port " << c.media_port << '\n'
+        << "media_channel " << c.media_channel << '\n'
+        << "media_stream " << c.media_stream << '\n'
+        << "media_profile " << c.media_profile << '\n'
+        << "media_options " << c.media_options << '\n'
+        << "media_use_tcp " << bool_text(c.media_use_tcp) << '\n'
+        << "events " << bool_text(c.events) << '\n'
+        << "events_log " << bool_text(c.events_log) << '\n'
+        << "events_topics " << c.events_topics << '\n'
         << "motion_detection " << bool_text(c.motion_detection) << '\n'
         << "decode_frames " << c.decode_frames << '\n'
         << "width "
-        << (!c.onvif_url.empty() && !c.width_configured ? "auto" : std::to_string(c.width)) << '\n'
+        << (discovered_dimensions && !c.width_configured ? "auto" : std::to_string(c.width)) << '\n'
         << "height "
-        << (!c.onvif_url.empty() && !c.height_configured ? "auto" : std::to_string(c.height))
+        << (discovered_dimensions && !c.height_configured ? "auto" : std::to_string(c.height))
         << '\n'
         << "framerate " << c.framerate << '\n'
         << "text_scale " << c.text_scale << '\n'
@@ -637,24 +663,31 @@ void Config::validate() const {
         check_range(!trim(c.camera_name).empty(), c, "camera_name is required");
         check_range(ids.insert(c.camera_id).second, c, "duplicate camera_id");
         check_range(names.insert(c.camera_name).second, c, "duplicate camera_name");
-        const std::string url = lower(trim(c.netcam_url));
-        const std::string onvif_url = lower(trim(c.onvif_url));
+        const std::string url = lower(trim(c.camera_url));
         const bool valid_media_url = url.rfind("rtsp://", 0) == 0 || url.rfind("rtmp://", 0) == 0 ||
                                      url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-        const bool valid_onvif_url =
-            onvif_url.rfind("http://", 0) == 0 || onvif_url.rfind("https://", 0) == 0;
-        check_range(valid_media_url || valid_onvif_url, c,
-                    "netcam_url or an HTTP(S) onvif_url is required");
-        check_range(url.empty() || onvif_url.empty(), c,
-                    "netcam_url and onvif_url cannot be set together");
-        check_range(onvif_url.empty() || valid_onvif_url, c, "onvif_url must use http or https");
-        check_range(!c.onvif_events || valid_onvif_url, c, "onvif_events requires onvif_url");
-        check_range(!c.onvif_log_events || c.onvif_events, c,
-                    "onvif_log_events requires onvif_events");
-        check_range(!c.onvif_events || !trim(c.onvif_motion_topics).empty(), c,
-                    "onvif_motion_topics cannot be empty when events are enabled");
-        check_range(c.onvif_auth == "auto" || c.onvif_auth == "digest" || c.onvif_auth == "wsse", c,
-                    "onvif_auth must be auto, digest, or wsse");
+        const bool management_url = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+        check_range(valid_media_url, c, "camera_url must use rtsp, rtmp, http, or https");
+        check_range(c.media_transport == "auto" || c.media_transport == "direct" ||
+                        c.media_transport == "onvif" || c.media_transport == "baichuan",
+                    c, "media_transport must be auto, direct, onvif, or baichuan");
+        check_range(c.media_transport != "onvif" || management_url, c,
+                    "onvif media transport requires an HTTP(S) camera_url");
+        check_range(c.media_port > 0 && c.media_port <= 65535, c,
+                    "media_port must be between 1 and 65535");
+        check_range(c.media_channel >= 0 && c.media_channel <= 255, c,
+                    "media_channel must be between 0 and 255");
+        check_range(c.media_stream == "main" || c.media_stream == "sub" ||
+                        c.media_stream == "extern" || c.media_stream == "external",
+                    c, "media_stream must be main, sub, extern, or external");
+        check_range(c.media_transport != "baichuan" || !trim(c.camera_userpass).empty(), c,
+                    "baichuan media transport requires camera_userpass");
+        check_range(!c.events || management_url, c, "events requires an HTTP(S) ONVIF camera_url");
+        check_range(!c.events_log || c.events, c, "events_log requires events");
+        check_range(!c.events || !trim(c.events_topics).empty(), c,
+                    "events_topics cannot be empty when events are enabled");
+        check_range(c.camera_auth == "auto" || c.camera_auth == "digest" || c.camera_auth == "wsse",
+                    c, "camera_auth must be auto, digest, or wsse");
         check_range(c.decode_frames == "all" || c.decode_frames == "keyframes" ||
                         c.decode_frames == "auto",
                     c, "decode_frames must be all, keyframes, or auto");

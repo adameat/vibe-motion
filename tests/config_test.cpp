@@ -55,7 +55,7 @@ int main() {
     assert(first.camera_name == "First camera");
     assert(first.width == 800); // cloned when the camera directive was encountered
     assert(first.height == 600);
-    assert(first.netcam_use_tcp);
+    assert(first.media_use_tcp);
     assert(first.picture_output && first.picture_output_mode == "best");
     assert(first.on_event_start == "/hooks/start %t %v %$");
     assert(first.unknown_options.at("future_global") == "retained value");
@@ -65,7 +65,7 @@ int main() {
     const CameraConfig& second = config.cameras.at(1);
     assert(second.camera_id == 4);
     assert(second.width == 1280);
-    assert(!second.netcam_use_tcp);
+    assert(!second.media_use_tcp);
     assert(second.movie_quality == 80);
     assert(!config.warnings.empty());
 
@@ -73,7 +73,8 @@ int main() {
     assert(deployment.cameras.size() == 3);
     assert(deployment.cameras.front().camera_id == 1);
     assert(deployment.cameras.back().camera_id == 3);
-    assert(deployment.cameras.front().netcam_url.rfind("rtmp://", 0) == 0);
+    assert(deployment.cameras.front().camera_url.rfind("rtmp://", 0) == 0);
+    assert(deployment.cameras.front().media_transport == "auto");
     assert(deployment.global.webcontrol_port == 8880);
     assert(deployment.global.camera_defaults.threshold_tune);
     assert(deployment.global.camera_defaults.noise_tune);
@@ -114,15 +115,15 @@ int main() {
     const Config onvif =
         ConfigParser().parse_string("camera cameras/onvif.conf\n", fixtures / "onvif-main.conf");
     assert(onvif.cameras.size() == 1);
-    assert(onvif.cameras.front().netcam_url.empty());
-    assert(onvif.cameras.front().onvif_url.find("device_service") != std::string::npos);
-    assert(onvif.cameras.front().onvif_events);
-    assert(onvif.cameras.front().onvif_log_events);
-    assert(!onvif.cameras.front().onvif_tls_verify);
+    assert(onvif.cameras.front().camera_url.find("device_service") != std::string::npos);
+    assert(onvif.cameras.front().media_transport == "auto");
+    assert(onvif.cameras.front().events);
+    assert(onvif.cameras.front().events_log);
+    assert(!onvif.cameras.front().camera_tls_verify);
     assert(!onvif.cameras.front().motion_detection);
     assert(onvif.cameras.front().decode_frames == "auto");
-    assert(onvif.cameras.front().onvif_profile == "Profile_1");
-    assert(onvif.cameras.front().onvif_auth == "auto");
+    assert(onvif.cameras.front().media_profile == "Profile_1");
+    assert(onvif.cameras.front().camera_auth == "auto");
     assert(!onvif.cameras.front().width_configured);
     assert(!onvif.cameras.front().height_configured);
     const CameraConfig defaults;
@@ -130,12 +131,32 @@ int main() {
     assert(onvif.cameras.front().height == defaults.height);
     const std::string onvif_dump = onvif.dump_effective();
     assert(onvif_dump.find("admin:secret") == std::string::npos);
-    assert(onvif_dump.find("onvif_userpass REDACTED") != std::string::npos);
+    assert(onvif_dump.find("camera_userpass REDACTED") != std::string::npos);
     assert(onvif_dump.find("motion_detection off") != std::string::npos);
     assert(onvif_dump.find("decode_frames auto") != std::string::npos);
-    assert(onvif_dump.find("onvif_log_events on") != std::string::npos);
+    assert(onvif_dump.find("events_log on") != std::string::npos);
     assert(onvif_dump.find("width auto") != std::string::npos);
     assert(onvif_dump.find("height auto") != std::string::npos);
+
+    const Config baichuan =
+        ConfigParser().parse_string("camera cameras/baichuan.conf\n", fixtures / "bc-main.conf");
+    assert(baichuan.cameras.size() == 1);
+    const CameraConfig& bc = baichuan.cameras.front();
+    assert(bc.camera_url == "http://camera.test/onvif/device_service");
+    assert(bc.media_transport == "auto");
+    assert(bc.media_port == 9000);
+    assert(bc.media_channel == 0);
+    assert(bc.media_stream == "main");
+    assert(bc.events);
+    assert(!bc.motion_detection);
+    assert(!bc.width_configured);
+    assert(!bc.height_configured);
+    const std::string baichuan_dump = baichuan.dump_effective();
+    assert(baichuan_dump.find("admin:secret") == std::string::npos);
+    assert(baichuan_dump.find("camera_userpass REDACTED") != std::string::npos);
+    assert(baichuan_dump.find("camera_url http://camera.test/onvif/device_service") !=
+           std::string::npos);
+    assert(baichuan_dump.find("width auto") != std::string::npos);
 
     ExpansionContext context;
     context.camera_id = 3;
@@ -195,7 +216,7 @@ int main() {
         CameraConfig camera;
         camera.camera_id = 1;
         camera.camera_name = "bad";
-        camera.onvif_events = true;
+        camera.events = true;
         camera.movie_passthrough = true;
         invalid.cameras.push_back(std::move(camera));
         invalid.validate();
@@ -204,9 +225,9 @@ int main() {
         Config invalid;
         CameraConfig camera;
         camera.camera_id = 1;
-        camera.camera_name = "ambiguous";
-        camera.netcam_url = "rtsp://camera.example/stream";
-        camera.onvif_url = "http://camera.example/onvif/device_service";
+        camera.camera_name = "wrong transport";
+        camera.camera_url = "rtsp://camera.example/stream";
+        camera.media_transport = "onvif";
         camera.movie_output = false;
         invalid.cameras.push_back(std::move(camera));
         invalid.validate();
@@ -214,6 +235,20 @@ int main() {
     expect_config_error([&] {
         Config invalid = onvif;
         invalid.cameras.front().decode_frames = "sometimes";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        ConfigParser().parse_string(
+            "camera_id 1\ncamera_name old\nnetcam_url rtsp://camera.test/stream\n");
+    });
+    expect_config_error([&] {
+        Config invalid = baichuan;
+        invalid.cameras.front().media_stream = "clear";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = baichuan;
+        invalid.cameras.front().media_port = 0;
         invalid.validate();
     });
     expect_config_error([&] {

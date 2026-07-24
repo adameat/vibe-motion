@@ -7,6 +7,8 @@ option(VIBE_ENABLE_SANITIZERS "Enable Clang AddressSanitizer and UndefinedBehavi
 option(VIBE_ENABLE_NATIVE_OPTIMIZATION
   "Optimize for the CPU used to build vibe-motion (-march=native)" OFF)
 option(VIBE_ENABLE_LTO "Enable Clang ThinLTO/interprocedural optimization" OFF)
+option(VIBE_ENABLE_BAICHUAN
+  "Build native Reolink Baichuan input support into vibe-motion" ON)
 set(VIBE_FFMPEG_ROOT "/usr/local" CACHE PATH "Root of one coherent FFmpeg installation")
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -99,18 +101,25 @@ add_library(vibe_motion_core
   src/http.cpp
   src/onvif.cpp
   src/runtime.cpp)
-target_include_directories(vibe_motion_core PUBLIC include PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(vibe_motion_core PUBLIC include)
+target_include_directories(vibe_motion_core SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_link_libraries(vibe_motion_core PUBLIC Threads::Threads
   CURL::libcurl LibXml2::LibXml2
   "${FFMPEG_AVFORMAT_LIBRARY}" "${FFMPEG_AVCODEC_LIBRARY}"
   "${FFMPEG_AVUTIL_LIBRARY}" "${FFMPEG_SWSCALE_LIBRARY}")
+if(VIBE_ENABLE_BAICHUAN)
+  target_sources(vibe_motion_core PRIVATE src/baichuan.cpp)
+  target_compile_definitions(vibe_motion_core PRIVATE VIBE_ENABLE_BAICHUAN=1)
+else()
+  target_compile_definitions(vibe_motion_core PRIVATE VIBE_ENABLE_BAICHUAN=0)
+endif()
 target_compile_options(vibe_motion_core PRIVATE ${VIBE_CLANG_WARNINGS})
 set_target_properties(vibe_motion_core PROPERTIES
   BUILD_RPATH "${VIBE_FFMPEG_ROOT}/lib;${VIBE_FFMPEG_ROOT}/lib64"
   INSTALL_RPATH "${VIBE_FFMPEG_ROOT}/lib;${VIBE_FFMPEG_ROOT}/lib64")
 
 add_executable(vibe-motion src/main.cpp)
-target_include_directories(vibe-motion PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(vibe-motion SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_link_libraries(vibe-motion PRIVATE vibe_motion_core)
 target_compile_options(vibe-motion PRIVATE ${VIBE_CLANG_WARNINGS})
 
@@ -135,7 +144,11 @@ add_custom_target(tidy
 
 if(VIBE_BUILD_TESTS)
   enable_testing()
-  foreach(test_name decode detection event config hooks http media onvif)
+  set(VIBE_TEST_NAMES decode detection event config hooks http media onvif)
+  if(VIBE_ENABLE_BAICHUAN)
+    list(APPEND VIBE_TEST_NAMES baichuan)
+  endif()
+  foreach(test_name ${VIBE_TEST_NAMES})
     add_executable(${test_name}_test tests/${test_name}_test.cpp)
     target_link_libraries(${test_name}_test PRIVATE vibe_motion_core)
     # The tests intentionally use assert() for checks and for calls whose
@@ -144,8 +157,11 @@ if(VIBE_BUILD_TESTS)
     add_test(NAME ${test_name} COMMAND ${test_name}_test)
   endforeach()
   add_dependencies(hooks_test vibe-motion)
-  target_include_directories(media_test PRIVATE "${FFMPEG_INCLUDE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_include_directories(media_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  if(TARGET baichuan_test)
+    target_include_directories(baichuan_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  endif()
+  target_include_directories(media_test SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
   find_program(FFMPEG_EXECUTABLE ffmpeg)
   if(FFMPEG_EXECUTABLE)
     add_test(NAME media_fixture COMMAND "${FFMPEG_EXECUTABLE}" -y -loglevel error
