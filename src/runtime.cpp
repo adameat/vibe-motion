@@ -1,5 +1,7 @@
 #include "vibe_motion/runtime.hpp"
 
+#include "baichuan.hpp"
+#include "runtime_util.hpp"
 #include "vibe_motion/detection.hpp"
 #include "vibe_motion/event.hpp"
 #include "vibe_motion/hooks.hpp"
@@ -27,6 +29,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -239,6 +242,7 @@ struct WorkerStatus {
     std::string decode_requested = "all";
     std::string decode_active = "all";
     std::int64_t keyframe_interval_ms = 0;
+    std::string input_transport;
     std::string input_codec;
     std::string movie_codec;
     std::string timelapse_codec;
@@ -270,7 +274,7 @@ struct WorkerStatus {
 
 FrameDecodeMode idle_decode_mode(const CameraConfig& config) {
     if (config.decode_frames == "keyframes" ||
-        (config.decode_frames == "auto" && config.onvif_events && !config.motion_detection)) {
+        (config.decode_frames == "auto" && config.events && !config.motion_detection)) {
         return FrameDecodeMode::keyframes;
     }
     return FrameDecodeMode::all;
@@ -315,12 +319,84 @@ std::string url_with_userpass(std::string url, const std::string& userpass) {
     const std::string username = userpass.substr(0, colon);
     const std::string password =
         colon == std::string::npos ? std::string{} : userpass.substr(colon + 1);
+    std::string scheme_name = url.substr(0, scheme);
+    std::transform(
+        scheme_name.begin(), scheme_name.end(), scheme_name.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    std::string lowered_url = url;
+    std::transform(
+        lowered_url.begin(), lowered_url.end(), lowered_url.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    const bool reolink_bcs_rtmp =
+        scheme_name == "rtmp" && lowered_url.find("/bcs/", authority) != std::string::npos;
+    const bool has_query_credentials = lowered_url.find("?user=") != std::string::npos ||
+                                       lowered_url.find("&user=") != std::string::npos ||
+                                       lowered_url.find("?username=") != std::string::npos ||
+                                       lowered_url.find("&username=") != std::string::npos ||
+                                       lowered_url.find("?password=") != std::string::npos ||
+                                       lowered_url.find("&password=") != std::string::npos;
+    if (reolink_bcs_rtmp && !has_query_credentials) {
+        url += url.find('?') == std::string::npos ? '?' : '&';
+        url += "user=" + url_encode(username) + "&password=" + url_encode(password);
+        return url;
+    }
     std::string credentials = url_encode(username);
     if (colon != std::string::npos) {
         credentials += ':' + url_encode(password);
     }
     url.insert(authority, credentials + '@');
     return url;
+}
+
+std::pair<std::string, std::string> split_userpass(const std::string& userpass) {
+    const auto separator = userpass.find(':');
+    if (separator == std::string::npos) {
+        return {userpass, {}};
+    }
+    return {userpass.substr(0, separator), userpass.substr(separator + 1)};
+}
+
+std::string camera_url_host(const std::string& url) {
+    const auto scheme = url.find("://");
+    if (scheme == std::string::npos) {
+        throw std::runtime_error("camera_url has no scheme");
+    }
+    const auto authority_begin = scheme + 3;
+    const auto authority_end = url.find_first_of("/?#", authority_begin);
+    std::string authority = url.substr(authority_begin, authority_end == std::string::npos
+                                                            ? std::string::npos
+                                                            : authority_end - authority_begin);
+    if (const auto at = authority.rfind('@'); at != std::string::npos) {
+        authority.erase(0, at + 1);
+    }
+    if (!authority.empty() && authority.front() == '[') {
+        const auto closing = authority.find(']');
+        if (closing == std::string::npos || closing == 1) {
+            throw std::runtime_error("camera_url has an invalid IPv6 host");
+        }
+        return authority.substr(1, closing - 1);
+    }
+    if (const auto colon = authority.rfind(':'); colon != std::string::npos) {
+        authority.resize(colon);
+    }
+    if (authority.empty()) {
+        throw std::runtime_error("camera_url has no host");
+    }
+    return authority;
+}
+
+enum class SelectedMediaTransport { direct, onvif, baichuan };
+
+const char* selected_transport_name(SelectedMediaTransport transport) {
+    switch (transport) {
+    case SelectedMediaTransport::direct:
+        return "direct";
+    case SelectedMediaTransport::onvif:
+        return "onvif-rtsp";
+    case SelectedMediaTransport::baichuan:
+        return "baichuan";
+    }
+    return "unknown";
 }
 
 class CameraWorker {
@@ -336,6 +412,7 @@ class CameraWorker {
         const auto idle_mode = idle_decode_mode(config_);
         status_.decode_requested = std::string(frame_decode_mode_name(idle_mode));
         status_.decode_active = status_.decode_requested;
+        status_.input_transport = config_.media_transport;
         status_.movie_codec = config_.movie_codec;
         status_.timelapse_codec = config_.timelapse_codec;
         status_.stream_codec = config_.stream_codec;
@@ -347,7 +424,7 @@ class CameraWorker {
 
     void start() {
         stopping_.store(false);
-        if (config_.onvif_events) {
+        if (config_.events) {
             onvif_thread_ = std::thread([this] { run_onvif_events(); });
         }
         thread_ = std::thread([this] { run(); });
@@ -381,14 +458,89 @@ class CameraWorker {
     }
 
   private:
+    BaichuanConfig baichuan_config(std::chrono::milliseconds timeout) const {
+        const auto [username, password] = split_userpass(config_.camera_userpass);
+        BaichuanStream stream = BaichuanStream::main;
+        if (config_.media_stream == "sub") {
+            stream = BaichuanStream::sub;
+        } else if (config_.media_stream == "extern" || config_.media_stream == "external") {
+            stream = BaichuanStream::external;
+        }
+        return {
+            .host = camera_url_host(config_.camera_url),
+            .port = static_cast<std::uint16_t>(config_.media_port),
+            .username = username,
+            .password = password,
+            .channel = static_cast<std::uint8_t>(config_.media_channel),
+            .stream = stream,
+            .open_timeout = timeout,
+        };
+    }
+
+    SelectedMediaTransport detect_media_transport(OnvifClient* client) {
+        bool onvif_identified = false;
+        std::string onvif_error;
+        if (client != nullptr) {
+            try {
+                const OnvifDeviceInformation information = client->device_information();
+                onvif_identified = true;
+                Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                         ": ONVIF device ", information.manufacturer, " ",
+                                         information.model, " (", information.firmware_version,
+                                         ")");
+            } catch (const std::exception& error) {
+                onvif_error = error.what();
+            }
+        }
+#if VIBE_ENABLE_BAICHUAN
+        const BaichuanProbeResult probe =
+            BaichuanClient::probe(baichuan_config(std::chrono::seconds(5)));
+        if (probe.status == BaichuanProbeStatus::available) {
+            Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                     ": auto media selected native Baichuan");
+            return SelectedMediaTransport::baichuan;
+        }
+        if (probe.status == BaichuanProbeStatus::authentication_failed) {
+            if (!config_.camera_userpass.empty()) {
+                throw std::runtime_error("Baichuan auto-detection authentication failed: " +
+                                         probe.error);
+            }
+            Logger::instance().write(
+                LogLevel::info, "camera ", config_.camera_id,
+                ": Baichuan probe had no explicit camera_userpass; preserving the configured "
+                "direct URL fallback");
+        } else {
+            Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                     ": Baichuan unavailable (", redact_secrets(probe.error),
+                                     "); trying the configured fallback");
+        }
+#else
+        Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                 ": build has no Baichuan support");
+#endif
+        if (onvif_identified) {
+            Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                     ": auto media selected ONVIF/RTSP");
+            return SelectedMediaTransport::onvif;
+        }
+        const bool looks_like_onvif =
+            runtime_detail::contains_case_insensitive(config_.camera_url, "/onvif/");
+        if (looks_like_onvif) {
+            throw std::runtime_error("ONVIF device identification failed: " + onvif_error);
+        }
+        Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                 ": auto media selected configured direct URL");
+        return SelectedMediaTransport::direct;
+    }
+
     OnvifClientConfig onvif_config() const {
         OnvifClientConfig result;
-        result.device_url = config_.onvif_url;
-        result.userpass = config_.onvif_userpass;
-        result.profile = config_.onvif_profile;
-        result.auth = config_.onvif_auth;
-        result.motion_topics = parse_onvif_topic_list(config_.onvif_motion_topics);
-        result.tls_verify = config_.onvif_tls_verify;
+        result.device_url = config_.camera_url;
+        result.userpass = config_.camera_userpass;
+        result.profile = config_.media_profile;
+        result.auth = config_.camera_auth;
+        result.motion_topics = parse_onvif_topic_list(config_.events_topics);
+        result.tls_verify = config_.camera_tls_verify;
         return result;
     }
 
@@ -410,7 +562,7 @@ class CameraWorker {
                     state.onvif_event_key_items = event.key_items;
                     state.onvif_event_data = event.data;
                 });
-                if (config_.onvif_log_events) {
+                if (config_.events_log) {
                     Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
                                              ": ONVIF notification ",
                                              redact_secrets(onvif_event_json(event)));
@@ -646,8 +798,17 @@ class CameraWorker {
         std::optional<std::chrono::system_clock::time_point> pending_onvif_event_time;
         std::optional<OnvifStream> onvif_stream;
         std::optional<OnvifClient> onvif_client;
-        if (!config_.onvif_url.empty()) {
+        if (runtime_detail::http_camera_url(config_.camera_url) &&
+            (config_.media_transport == "auto" || config_.media_transport == "onvif")) {
             onvif_client.emplace(onvif_config());
+        }
+        std::optional<SelectedMediaTransport> selected_transport;
+        if (config_.media_transport == "direct") {
+            selected_transport = SelectedMediaTransport::direct;
+        } else if (config_.media_transport == "onvif") {
+            selected_transport = SelectedMediaTransport::onvif;
+        } else if (config_.media_transport == "baichuan") {
+            selected_transport = SelectedMediaTransport::baichuan;
         }
         const auto configured_idle_decode_mode = idle_decode_mode(config_);
         const bool dynamic_full_decode = config_.decode_frames == "auto" &&
@@ -659,11 +820,43 @@ class CameraWorker {
         });
 
         while (!stopping_.load()) {
-            std::string media_url = config_.netcam_url;
+            if (!selected_transport.has_value()) {
+                try {
+                    selected_transport =
+                        detect_media_transport(onvif_client.has_value() ? &*onvif_client : nullptr);
+                } catch (const std::exception& error) {
+                    const std::string safe_error = redact_secrets(error.what());
+                    set_status([&](WorkerStatus& state) {
+                        state.connected = false;
+                        ++state.reconnects;
+                        state.error = safe_error;
+                        state.onvif_media_error = safe_error;
+                    });
+                    Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
+                                             ": auto media detection: ", safe_error);
+                    for (int tenth = 0; tenth < 10 && !stopping_.load(); ++tenth) {
+                        std::this_thread::sleep_for(100ms);
+                    }
+                    continue;
+                }
+            }
+            const bool use_baichuan = *selected_transport == SelectedMediaTransport::baichuan;
+            const bool use_onvif = *selected_transport == SelectedMediaTransport::onvif;
+            std::string media_url = config_.camera_url;
             int analysis_width = config_.width;
             int analysis_height = config_.height;
-            if (!config_.onvif_url.empty()) {
+            if (use_baichuan) {
+                if (!config_.width_configured) {
+                    analysis_width = 0;
+                }
+                if (!config_.height_configured) {
+                    analysis_height = 0;
+                }
+            } else if (use_onvif) {
                 try {
+                    if (!onvif_client.has_value()) {
+                        throw std::runtime_error("ONVIF media client is unavailable");
+                    }
                     OnvifStream resolved = onvif_client->resolve_stream();
                     const bool newly_resolved =
                         !onvif_stream || onvif_stream->uri != resolved.uri ||
@@ -707,23 +900,34 @@ class CameraWorker {
                 }
             }
             CameraSourceConfig source_config;
-            const std::string media_userpass =
-                !config_.netcam_userpass.empty() ? config_.netcam_userpass : config_.onvif_userpass;
-            source_config.url = url_with_userpass(std::move(media_url), media_userpass);
+            if (use_baichuan) {
+                const auto [username, password] = split_userpass(config_.camera_userpass);
+                source_config.baichuan = BaichuanSourceConfig{
+                    .host = camera_url_host(config_.camera_url),
+                    .port = config_.media_port,
+                    .username = username,
+                    .password = password,
+                    .channel = config_.media_channel,
+                    .stream = config_.media_stream,
+                };
+            } else {
+                source_config.url =
+                    url_with_userpass(std::move(media_url), config_.camera_userpass);
+            }
             source_config.width = analysis_width;
             source_config.height = analysis_height;
             source_config.analysis_framerate = config_.framerate;
             source_config.jpeg_quality = config_.movie_quality;
             source_config.decode_mode = configured_idle_decode_mode;
-            const auto net_options = parse_netcam_options(config_.netcam_params);
+            const auto net_options = parse_netcam_options(config_.media_options);
             if (const auto found = net_options.find("interrupt"); found != net_options.end()) {
                 try {
                     source_config.io_timeout = std::chrono::seconds(std::stoi(found->second));
                 } catch (...) { /* config validation owns diagnostics */
                 }
             }
-            if (config_.netcam_use_tcp || (net_options.count("rtsp_transport") &&
-                                           net_options.at("rtsp_transport") == "tcp")) {
+            if (config_.media_use_tcp || (net_options.count("rtsp_transport") &&
+                                          net_options.at("rtsp_transport") == "tcp")) {
                 source_config.rtsp_transport = "tcp";
             } else {
                 source_config.rtsp_transport.clear();
@@ -762,6 +966,7 @@ class CameraWorker {
             set_status([&](WorkerStatus& state) {
                 state.connected = true;
                 state.error.clear();
+                state.input_transport = selected_transport_name(*selected_transport);
                 state.input_codec = input_codec;
                 state.movie_codec = normalize_video_codec(config_.movie_codec) == "copy"
                                         ? input_codec
@@ -912,10 +1117,10 @@ class CameraWorker {
                 const bool onvif_triggered = onvif_motion_.load() || onvif_trigger_frames > 0;
                 const bool qualifying_motion =
                     (config_.motion_detection && warmed && detection.motion) ||
-                    (config_.onvif_events && onvif_triggered);
+                    (config_.events && onvif_triggered);
                 const auto decision =
                     events.update(qualifying_motion, std::chrono::steady_clock::now(),
-                                  config_.onvif_events && onvif_edge);
+                                  config_.events && onvif_edge);
                 if (onvif_trigger_frames > 0) {
                     --onvif_trigger_frames;
                 }
@@ -1232,6 +1437,7 @@ class Application::Impl {
                    << ",\"decode_requested\":\"" << json_escape(state.decode_requested) << "\""
                    << ",\"decode_active\":\"" << json_escape(state.decode_active) << "\""
                    << ",\"keyframe_interval_ms\":" << state.keyframe_interval_ms
+                   << ",\"input_transport\":\"" << json_escape(state.input_transport) << "\""
                    << ",\"input_codec\":\"" << json_escape(state.input_codec) << "\""
                    << ",\"movie_codec\":\"" << json_escape(state.movie_codec) << "\""
                    << ",\"timelapse_codec\":\"" << json_escape(state.timelapse_codec) << "\""
