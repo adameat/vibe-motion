@@ -13,4 +13,8 @@ int main() {
     assert(contains_case_insensitive("http://camera.test/OnViF/device_service", "/onvif/"));
     assert(contains_case_insensitive("Mixed Case Value", "CASE"));
     assert(!contains_case_insensitive("Mixed Case Value", "missing"));
+
+    assert(onvif_identification_failure_is_fatal(true, "HTTP://camera.test/OnViF/device_service"));
+    assert(!onvif_identification_failure_is_fatal(false, "rtsp://camera.test/onvif/main"));
+    assert(!onvif_identification_failure_is_fatal(true, "https://camera.test/media/main"));
 }

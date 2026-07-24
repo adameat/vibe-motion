@@ -31,4 +31,8 @@ inline bool http_camera_url(std::string_view url) {
            starts_with_case_insensitive(url, "https://");
 }
 
+inline bool onvif_identification_failure_is_fatal(bool onvif_client_present, std::string_view url) {
+    return onvif_client_present && contains_case_insensitive(url, "/onvif/");
+}
+
 } // namespace vibe_motion::runtime_detail

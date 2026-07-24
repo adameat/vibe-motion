@@ -523,9 +523,8 @@ class CameraWorker {
                                      ": auto media selected ONVIF/RTSP");
             return SelectedMediaTransport::onvif;
         }
-        const bool looks_like_onvif =
-            runtime_detail::contains_case_insensitive(config_.camera_url, "/onvif/");
-        if (looks_like_onvif) {
+        if (runtime_detail::onvif_identification_failure_is_fatal(client != nullptr,
+                                                                  config_.camera_url)) {
             throw std::runtime_error("ONVIF device identification failed: " + onvif_error);
         }
         Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
