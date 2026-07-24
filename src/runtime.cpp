@@ -477,7 +477,7 @@ class CameraWorker {
         };
     }
 
-    SelectedMediaTransport detect_media_transport(OnvifClient* client) {
+    SelectedMediaTransport detect_media_transport(OnvifClient* client, bool skip_baichuan) {
         bool onvif_identified = false;
         std::string onvif_error;
         if (client != nullptr) {
@@ -492,32 +492,37 @@ class CameraWorker {
                 onvif_error = error.what();
             }
         }
-#if VIBE_ENABLE_BAICHUAN
-        const BaichuanProbeResult probe =
-            BaichuanClient::probe(baichuan_config(std::chrono::seconds(5)));
-        if (probe.status == BaichuanProbeStatus::available) {
+        if (skip_baichuan) {
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
-                                     ": auto media selected native Baichuan");
-            return SelectedMediaTransport::baichuan;
-        }
-        if (probe.status == BaichuanProbeStatus::authentication_failed) {
-            if (!config_.camera_userpass.empty()) {
-                throw std::runtime_error("Baichuan auto-detection authentication failed: " +
-                                         probe.error);
-            }
-            Logger::instance().write(
-                LogLevel::info, "camera ", config_.camera_id,
-                ": Baichuan probe had no explicit camera_userpass; preserving the configured "
-                "direct URL fallback");
+                                     ": auto media skipping Baichuan after stream open failure");
         } else {
-            Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
-                                     ": Baichuan unavailable (", redact_secrets(probe.error),
-                                     "); trying the configured fallback");
-        }
+#if VIBE_ENABLE_BAICHUAN
+            const BaichuanProbeResult probe =
+                BaichuanClient::probe(baichuan_config(std::chrono::seconds(5)));
+            if (probe.status == BaichuanProbeStatus::available) {
+                Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                         ": auto media selected native Baichuan");
+                return SelectedMediaTransport::baichuan;
+            }
+            if (probe.status == BaichuanProbeStatus::authentication_failed) {
+                if (!config_.camera_userpass.empty()) {
+                    throw std::runtime_error("Baichuan auto-detection authentication failed: " +
+                                             probe.error);
+                }
+                Logger::instance().write(
+                    LogLevel::info, "camera ", config_.camera_id,
+                    ": Baichuan probe had no explicit camera_userpass; preserving the configured "
+                    "direct URL fallback");
+            } else {
+                Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                         ": Baichuan unavailable (", redact_secrets(probe.error),
+                                         "); trying the configured fallback");
+            }
 #else
-        Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
-                                 ": build has no Baichuan support");
+            Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
+                                     ": build has no Baichuan support");
 #endif
+        }
         if (onvif_identified) {
             Logger::instance().write(LogLevel::info, "camera ", config_.camera_id,
                                      ": auto media selected ONVIF/RTSP");
@@ -802,6 +807,7 @@ class CameraWorker {
             onvif_client.emplace(onvif_config());
         }
         std::optional<SelectedMediaTransport> selected_transport;
+        bool auto_skip_baichuan = false;
         if (config_.media_transport == "direct") {
             selected_transport = SelectedMediaTransport::direct;
         } else if (config_.media_transport == "onvif") {
@@ -821,8 +827,8 @@ class CameraWorker {
         while (!stopping_.load()) {
             if (!selected_transport.has_value()) {
                 try {
-                    selected_transport =
-                        detect_media_transport(onvif_client.has_value() ? &*onvif_client : nullptr);
+                    selected_transport = detect_media_transport(
+                        onvif_client.has_value() ? &*onvif_client : nullptr, auto_skip_baichuan);
                 } catch (const std::exception& error) {
                     const std::string safe_error = redact_secrets(error.what());
                     set_status([&](WorkerStatus& state) {
@@ -947,6 +953,11 @@ class CameraWorker {
                 });
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": connect failed: ", redact_secrets(open_error));
+                if (runtime_detail::auto_baichuan_open_failure_requires_reselection(
+                        config_.media_transport, use_baichuan)) {
+                    auto_skip_baichuan = true;
+                    selected_transport.reset();
+                }
                 for (int tenth = 0; tenth < 10 && !stopping_.load(); ++tenth) {
                     std::this_thread::sleep_for(100ms);
                 }

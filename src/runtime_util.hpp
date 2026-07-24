@@ -35,4 +35,9 @@ inline bool onvif_identification_failure_is_fatal(bool onvif_client_present, std
     return onvif_client_present && contains_case_insensitive(url, "/onvif/");
 }
 
+inline bool auto_baichuan_open_failure_requires_reselection(std::string_view configured_transport,
+                                                            bool selected_baichuan) {
+    return configured_transport == "auto" && selected_baichuan;
+}
+
 } // namespace vibe_motion::runtime_detail

@@ -17,4 +17,8 @@ int main() {
     assert(onvif_identification_failure_is_fatal(true, "HTTP://camera.test/OnViF/device_service"));
     assert(!onvif_identification_failure_is_fatal(false, "rtsp://camera.test/onvif/main"));
     assert(!onvif_identification_failure_is_fatal(true, "https://camera.test/media/main"));
+
+    assert(auto_baichuan_open_failure_requires_reselection("auto", true));
+    assert(!auto_baichuan_open_failure_requires_reselection("auto", false));
+    assert(!auto_baichuan_open_failure_requires_reselection("baichuan", true));
 }
