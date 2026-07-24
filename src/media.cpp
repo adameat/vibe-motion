@@ -2,6 +2,10 @@
 
 #include "media_internal.hpp"
 
+#if VIBE_ENABLE_BAICHUAN
+#include "baichuan.hpp"
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -447,6 +451,15 @@ struct NetworkCameraSource::Impl {
     bool input_eof = false;
     std::atomic<std::int64_t> deadline_us{0};
     StreamInfo stream;
+#if VIBE_ENABLE_BAICHUAN
+    std::unique_ptr<BaichuanClient> baichuan;
+    AVIOContext* baichuan_io = nullptr;
+    std::vector<std::uint8_t> baichuan_pending;
+    std::size_t baichuan_offset = 0;
+    int baichuan_fps = 0;
+    std::int64_t baichuan_packet_sequence = 0;
+    std::string baichuan_error;
+#endif
 
     ~Impl() {
         close();
@@ -468,6 +481,61 @@ struct NetworkCameraSource::Impl {
         }
     }
 
+#if VIBE_ENABLE_BAICHUAN
+    static int read_baichuan(void* opaque, std::uint8_t* buffer, int requested) noexcept {
+        auto* self = static_cast<Impl*>(opaque);
+        try {
+            if (self == nullptr || self->baichuan == nullptr || requested <= 0) {
+                return AVERROR(EINVAL);
+            }
+            while (self->baichuan_offset >= self->baichuan_pending.size()) {
+                const auto deadline = self->deadline_us.load(std::memory_order_relaxed);
+                const auto now = steady_us();
+                if (deadline > 0 && now >= deadline) {
+                    return AVERROR(ETIMEDOUT);
+                }
+                std::int64_t wait_ms = 250;
+                if (deadline > 0) {
+                    wait_ms = std::clamp<std::int64_t>((deadline - now + 999) / 1000, 1, wait_ms);
+                }
+                auto next = self->baichuan->read(std::chrono::milliseconds(wait_ms));
+                if (next.status == BaichuanReadStatus::timeout) {
+                    continue;
+                }
+                if (next.status == BaichuanReadStatus::error) {
+                    self->baichuan_error = std::move(next.error);
+                    return AVERROR(EIO);
+                }
+                self->baichuan_pending = std::move(next.frame.data);
+                self->baichuan_offset = 0;
+            }
+            const auto available = self->baichuan_pending.size() - self->baichuan_offset;
+            const auto count =
+                std::min<std::size_t>(available, static_cast<std::size_t>(requested));
+            std::memcpy(buffer, self->baichuan_pending.data() + self->baichuan_offset, count);
+            self->baichuan_offset += count;
+            return static_cast<int>(count);
+        } catch (...) {
+            if (self != nullptr) {
+                self->baichuan_error = "unexpected Baichuan input failure";
+            }
+            return AVERROR(EIO);
+        }
+    }
+
+    std::string input_error(int result) const {
+        std::string message = ff_error(result);
+        if (!baichuan_error.empty()) {
+            message += ": " + baichuan_error;
+        }
+        return message;
+    }
+#else
+    std::string input_error(int result) const {
+        return ff_error(result);
+    }
+#endif
+
     void close() noexcept {
         deadline_us.store(0, std::memory_order_relaxed);
         sws_freeContext(gray_scaler);
@@ -481,6 +549,21 @@ struct NetworkCameraSource::Impl {
         if (format != nullptr) {
             avformat_close_input(&format);
         }
+#if VIBE_ENABLE_BAICHUAN
+        if (baichuan_io != nullptr) {
+            av_freep(&baichuan_io->buffer);
+            avio_context_free(&baichuan_io);
+        }
+        if (baichuan != nullptr) {
+            baichuan->close();
+            baichuan.reset();
+        }
+        baichuan_pending.clear();
+        baichuan_offset = 0;
+        baichuan_fps = 0;
+        baichuan_packet_sequence = 0;
+        baichuan_error.clear();
+#endif
         video_stream = -1;
         output_width = 0;
         output_height = 0;
@@ -660,7 +743,8 @@ NetworkCameraSource& NetworkCameraSource::operator=(NetworkCameraSource&&) noexc
 
 bool NetworkCameraSource::open(std::string* error) {
     impl_->close();
-    if (impl_->config.url.empty()) {
+    const bool use_baichuan = impl_->config.baichuan.has_value();
+    if (!use_baichuan && impl_->config.url.empty()) {
         set_error(error, "camera URL is empty");
         return false;
     }
@@ -672,21 +756,98 @@ bool NetworkCameraSource::open(std::string* error) {
     context->flags |= AVFMT_FLAG_DISCARD_CORRUPT;
     context->interrupt_callback = AVIOInterruptCB{&Impl::interrupt, impl_.get()};
     AVDictionary* options = nullptr;
-    if (!impl_->config.rtsp_transport.empty() && impl_->config.url.rfind("rtsp", 0) == 0) {
-        av_dict_set(&options, "rtsp_transport", impl_->config.rtsp_transport.c_str(), 0);
-    }
-    for (const auto& option : impl_->config.options) {
-        av_dict_set(&options, option.first.c_str(), option.second.c_str(), 0);
+    const AVInputFormat* input_format = nullptr;
+    const char* input_url = impl_->config.url.c_str();
+    if (use_baichuan) {
+#if VIBE_ENABLE_BAICHUAN
+        const auto& requested = *impl_->config.baichuan;
+        if (requested.port <= 0 || requested.port > 65535 || requested.channel < 0 ||
+            requested.channel > 255) {
+            avformat_free_context(context);
+            set_error(error, "invalid Baichuan port or channel");
+            return false;
+        }
+        BaichuanStream stream = BaichuanStream::main;
+        if (requested.stream == "sub") {
+            stream = BaichuanStream::sub;
+        } else if (requested.stream == "extern" || requested.stream == "external") {
+            stream = BaichuanStream::external;
+        }
+        BaichuanConfig baichuan_config{
+            .host = requested.host,
+            .port = static_cast<std::uint16_t>(requested.port),
+            .username = requested.username,
+            .password = requested.password,
+            .channel = static_cast<std::uint8_t>(requested.channel),
+            .stream = stream,
+            .open_timeout = impl_->config.io_timeout * 2,
+        };
+        impl_->baichuan = std::make_unique<BaichuanClient>(std::move(baichuan_config));
+        std::string baichuan_error;
+        if (!impl_->baichuan->open(&baichuan_error)) {
+            avformat_free_context(context);
+            impl_->baichuan.reset();
+            set_error(error, "cannot open Baichuan camera: " + baichuan_error);
+            return false;
+        }
+        const auto& metadata = impl_->baichuan->metadata();
+        input_format =
+            av_find_input_format(metadata.codec == BaichuanCodec::hevc ? "hevc" : "h264");
+        if (input_format == nullptr) {
+            avformat_free_context(context);
+            impl_->baichuan->close();
+            impl_->baichuan.reset();
+            set_error(error, "FFmpeg raw H.264/HEVC demuxer is unavailable");
+            return false;
+        }
+        constexpr int io_buffer_size = 64 * 1024;
+        auto* io_buffer = static_cast<std::uint8_t*>(av_malloc(io_buffer_size));
+        if (io_buffer != nullptr) {
+            impl_->baichuan_io = avio_alloc_context(io_buffer, io_buffer_size, 0, impl_.get(),
+                                                    &Impl::read_baichuan, nullptr, nullptr);
+        }
+        if (impl_->baichuan_io == nullptr) {
+            av_free(io_buffer);
+            avformat_free_context(context);
+            impl_->baichuan->close();
+            impl_->baichuan.reset();
+            set_error(error, "cannot allocate Baichuan FFmpeg input buffer");
+            return false;
+        }
+        context->pb = impl_->baichuan_io;
+        context->flags |= AVFMT_FLAG_CUSTOM_IO | AVFMT_FLAG_GENPTS;
+        input_url = nullptr;
+        const int fps = metadata.fps > 0 ? metadata.fps : impl_->config.analysis_framerate;
+        impl_->baichuan_fps = std::max(fps, 1);
+        if (fps > 0) {
+            const std::string value = std::to_string(fps);
+            av_dict_set(&options, "framerate", value.c_str(), 0);
+        }
+        av_dict_set(&options, "probesize", "1048576", 0);
+        av_dict_set(&options, "analyzeduration", "2000000", 0);
+#else
+        avformat_free_context(context);
+        set_error(error, "this vibe-motion build has no Baichuan support");
+        return false;
+#endif
+    } else {
+        if (!impl_->config.rtsp_transport.empty() && impl_->config.url.rfind("rtsp", 0) == 0) {
+            av_dict_set(&options, "rtsp_transport", impl_->config.rtsp_transport.c_str(), 0);
+        }
+        for (const auto& option : impl_->config.options) {
+            av_dict_set(&options, option.first.c_str(), option.second.c_str(), 0);
+        }
     }
     impl_->arm_timeout();
-    int result = avformat_open_input(&context, impl_->config.url.c_str(), nullptr, &options);
+    int result = avformat_open_input(&context, input_url, input_format, &options);
     av_dict_free(&options);
     impl_->deadline_us.store(0, std::memory_order_relaxed);
     if (result < 0) {
         if (context != nullptr) {
             avformat_free_context(context);
         }
-        set_error(error, "cannot open camera " + impl_->config.url + ": " + ff_error(result));
+        set_error(error, "cannot open camera input: " + impl_->input_error(result));
+        impl_->close();
         return false;
     }
     impl_->format = context;
@@ -694,7 +855,7 @@ bool NetworkCameraSource::open(std::string* error) {
     result = avformat_find_stream_info(context, nullptr);
     impl_->deadline_us.store(0, std::memory_order_relaxed);
     if (result < 0) {
-        set_error(error, "cannot read camera stream information: " + ff_error(result));
+        set_error(error, "cannot read camera stream information: " + impl_->input_error(result));
         impl_->close();
         return false;
     }
@@ -741,6 +902,7 @@ bool NetworkCameraSource::open(std::string* error) {
     }
     stream_impl->time_base = input_stream->time_base;
     stream_impl->frame_rate = av_guess_frame_rate(context, input_stream, nullptr);
+    stream_impl->repair_timestamps_from_arrival = !use_baichuan;
     impl_->stream = StreamInfo(std::move(stream_impl));
     impl_->output_width = impl_->config.width > 0 ? impl_->config.width : impl_->decoder->width;
     impl_->output_height = impl_->config.height > 0 ? impl_->config.height : impl_->decoder->height;
@@ -863,13 +1025,26 @@ CameraReadResult NetworkCameraSource::read() {
                 return {CameraReadStatus::error, std::nullopt,
                         "video decoder flush failed: " + ff_error(result)};
             }
-            return {CameraReadStatus::error, std::nullopt, ff_error(result)};
+            return {CameraReadStatus::error, std::nullopt, impl_->input_error(result)};
         }
         if (input->stream_index == impl_->video_stream) {
             break;
         }
         av_packet_unref(input.get());
     }
+
+#if VIBE_ENABLE_BAICHUAN
+    if (impl_->baichuan != nullptr && impl_->baichuan_fps > 0 && impl_->input_time_base.num > 0 &&
+        impl_->input_time_base.den > 0) {
+        const AVRational frame_time_base{1, impl_->baichuan_fps};
+        input->pts =
+            av_rescale_q(impl_->baichuan_packet_sequence, frame_time_base, impl_->input_time_base);
+        input->dts = input->pts;
+        input->duration =
+            std::max<std::int64_t>(av_rescale_q(1, frame_time_base, impl_->input_time_base), 1);
+        ++impl_->baichuan_packet_sequence;
+    }
+#endif
 
     auto packet_impl = std::make_unique<VideoPacket::Impl>();
     if (!packet_impl->packet || av_packet_ref(packet_impl->packet.get(), input.get()) < 0) {
@@ -1388,7 +1563,8 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
     }
     impl_->header_written = true;
     impl_->source = stream;
-    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base));
+    impl_->timestamps.reset(av_rescale_q(1, AVRational{1, 1}, impl_->output_stream->time_base),
+                            impl_->source.impl_->repair_timestamps_from_arrival);
     return true;
 }
 bool EventMovieWriter::write_preroll(const PacketRing& ring, std::string* error) {

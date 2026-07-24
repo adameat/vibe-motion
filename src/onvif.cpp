@@ -705,6 +705,25 @@ OnvifClient::OnvifClient(OnvifClientConfig config) : config_(std::move(config)) 
     }
 }
 
+OnvifDeviceInformation OnvifClient::device_information() {
+    constexpr auto action = "http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation";
+    const auto response =
+        post_soap(config_, config_.device_url, action, "<tds:GetDeviceInformation/>", nullptr,
+                  config_.request_timeout);
+    auto document = parse_xml(response.body);
+    xmlNode* root = xmlDocGetRootElement(document.get());
+    OnvifDeviceInformation information;
+    information.manufacturer = content(first_descendant(root, "Manufacturer"));
+    information.model = content(first_descendant(root, "Model"));
+    information.firmware_version = content(first_descendant(root, "FirmwareVersion"));
+    information.serial_number = content(first_descendant(root, "SerialNumber"));
+    information.hardware_id = content(first_descendant(root, "HardwareId"));
+    if (information.manufacturer.empty() && information.model.empty()) {
+        throw std::runtime_error("camera returned empty ONVIF device information");
+    }
+    return information;
+}
+
 OnvifStream OnvifClient::resolve_stream() {
     const Services services = get_services(config_);
     if (services.media.empty()) {

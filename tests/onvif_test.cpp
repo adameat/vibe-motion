@@ -117,6 +117,15 @@ class SoapCamera {
         assert(request.find("PasswordDigest") != std::string::npos);
         assert(request.find("admin") != std::string::npos);
         assert(request.find("secret") == std::string::npos);
+        if (request.find("GetDeviceInformation") != std::string::npos) {
+            return envelope(
+                "<tds:GetDeviceInformationResponse><tds:Manufacturer>Reolink</tds:Manufacturer>"
+                "<tds:Model>Test Camera</tds:Model>"
+                "<tds:FirmwareVersion>v1.2.3</tds:FirmwareVersion>"
+                "<tds:SerialNumber>serial-1</tds:SerialNumber>"
+                "<tds:HardwareId>hardware-1</tds:HardwareId>"
+                "</tds:GetDeviceInformationResponse>");
+        }
         if (request.find("GetCapabilities") != std::string::npos) {
             return envelope(
                 "<tds:GetCapabilitiesResponse><tds:Capabilities>"
@@ -238,6 +247,13 @@ int main() {
     config.request_timeout = std::chrono::seconds(2);
     config.pull_timeout = std::chrono::seconds(1);
     OnvifClient client(config);
+
+    const OnvifDeviceInformation information = client.device_information();
+    assert(information.manufacturer == "Reolink");
+    assert(information.model == "Test Camera");
+    assert(information.firmware_version == "v1.2.3");
+    assert(information.serial_number == "serial-1");
+    assert(information.hardware_id == "hardware-1");
 
     const OnvifStream stream = client.resolve_stream();
     assert(stream.uri == "rtsp://camera.test/live/main");

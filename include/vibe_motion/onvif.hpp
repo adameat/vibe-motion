@@ -30,6 +30,14 @@ struct OnvifStream {
     int height = 0;
 };
 
+struct OnvifDeviceInformation {
+    std::string manufacturer;
+    std::string model;
+    std::string firmware_version;
+    std::string serial_number;
+    std::string hardware_id;
+};
+
 struct OnvifEvent {
     std::string key;
     std::string topic;
@@ -53,6 +61,7 @@ class OnvifClient {
   public:
     explicit OnvifClient(OnvifClientConfig config);
 
+    OnvifDeviceInformation device_information();
     OnvifStream resolve_stream();
 
     // Runs until stop becomes true. Pull requests are interruptible, so shutdown

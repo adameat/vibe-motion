@@ -14,7 +14,9 @@ service migration.
 
 The daemon requires Clang 22, libcurl and libxml2 development headers, and a coherent
 FFmpeg development installation containing `libavformat`, `libavcodec`, `libavutil`, and
-`libswscale`. On this development host that FFmpeg installation lives under `/usr/local`.
+`libswscale`. Native Baichuan input is enabled by default and uses the cryptographic
+primitives already supplied by `libavutil`. On this development host the FFmpeg
+installation lives under `/usr/local`.
 
 ```sh
 cmake -S . -B build-clang \
@@ -37,6 +39,10 @@ build directory; keep separate deployment and sanitizer builds.
 
 Do not point headers at one FFmpeg installation and libraries at another.  The
 CMake configuration intentionally searches only below `VIBE_FFMPEG_ROOT`.
+
+The Baichuan client is implemented directly in C++ and links into the
+`vibe-motion` executable. Build with `-DVIBE_ENABLE_BAICHUAN=OFF` when
+Baichuan is not needed.
 
 ## Run
 
@@ -63,41 +69,50 @@ the next timelapse keyframe before receiving media packets. This route requires
 `timelapse_codec h264` or `timelapse_codec hevc`; MPEG-4 Part 2 timelapses cannot
 be served in this fragmented MP4 stream and the route returns HTTP 503.
 
-## ONVIF cameras
+## Camera connection and automatic transport
 
-`onvif_url` is the camera's Device Service endpoint, commonly
-`http://camera/onvif/device_service`. When it is present, `vibe-motion` discovers the Media
-service, gets the available profiles, and uses `GetStreamUri` instead of `netcam_url`.
-`onvif_profile` optionally selects an exact profile `Name` (a token is also accepted); without
-it the profile with the largest `width × height` is selected. `width` and `height` may be
-omitted for ONVIF cameras and then come from that profile. Explicit dimensions remain an
-analysis-scaling override. A camera file can use `width auto` and `height auto` to undo
-dimensions inherited from the main file.
+Each camera has one address in `camera_url` and one credential set in
+`camera_userpass`. Use an ONVIF Device Service endpoint such as
+`http://camera/onvif/device_service` when the camera supports ONVIF, or an
+RTSP/RTMP/HTTP media URL for a direct-only camera.
 
-ONVIF event polling runs independently from successful stream discovery, so it can connect while
-media discovery is retrying. Both features use `onvif_url`; configuring it still makes the ONVIF
-`GetStreamUri` result the camera's media source, so event-only ONVIF alongside a separate
-`netcam_url` is not supported:
+`media_transport auto` probes the host for a working authenticated native
+Reolink Baichuan service first. If it is unavailable, an ONVIF `camera_url`
+falls back to ONVIF media discovery and a direct media URL is opened directly.
+An authentication failure is not silently downgraded. `direct`, `onvif`, and
+`baichuan` can be selected explicitly for diagnostics.
+
+For ONVIF media, vibe-motion discovers the Media service, gets the available
+profiles, and uses `GetStreamUri`. `media_profile` optionally selects an exact
+profile `Name` (a token is also accepted); without it the profile with the
+largest `width × height` is selected. `width` and `height` may be omitted and
+then come from the selected profile or native stream. Explicit dimensions
+remain an analysis-scaling override. A camera file can use `width auto` and
+`height auto` to undo dimensions inherited from the main file.
+
+ONVIF event polling runs independently from successful stream discovery, so it
+can connect while media discovery or Baichuan is retrying:
 
 ```conf
-onvif_url http://192.0.2.20/onvif/device_service
-onvif_userpass user:password
-onvif_auth auto
-onvif_events on
+camera_url http://192.0.2.20/onvif/device_service
+camera_userpass user:password
+camera_auth auto
+media_transport auto
+events on
 motion_detection off
 decode_frames auto
-onvif_motion_topics Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect
+events_topics Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect
 ```
 
-`onvif_events on` creates a PullPoint subscription without a server-side topic filter and
-locally accepts the comma-separated topic fragments in `onvif_motion_topics`. This works
+`events on` creates a PullPoint subscription without a server-side topic filter and
+locally accepts the comma-separated topic fragments in `events_topics`. This works
 with common topics such as `RuleEngine/CellMotionDetector/Motion` and
 `VideoSource/MotionAlarm`, plus Reolink smart topics such as `PeopleDetect`, `VehicleDetect`,
 `DogCatDetect`, and `FaceDetect`, while allowing other vendor topics to be added. Boolean
 `IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items drive the event state.
 Multiple rules/sources are tracked separately and combined by OR.
 
-Set `onvif_log_events on` while commissioning a camera to write every received notification
+Set `events_log on` while commissioning a camera to write every received notification
 as a single structured JSON object at info level. The record includes the raw topic, whether
 it matched a configured motion topic, whether a boolean state was found, UTC time, operation,
 Source/Key/Data items, and the serialized raw `NotificationMessage` XML subtree. This captures
@@ -127,13 +142,55 @@ configured, requested, and active decode modes plus the latest observed keyframe
 
 The JSON status reports subscription health, aggregate motion state, profile token, event
 count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
-media-discovery and event-subscription errors. `onvif_auth auto`
+media-discovery and event-subscription errors. `camera_auth auto`
 first tries HTTP Digest and falls back to WS-Security UsernameToken PasswordDigest for cameras
 such as Reolink; `digest` and `wsse` force either mode. HTTPS certificates are verified by
-default; `onvif_tls_verify off` is available for explicitly trusted cameras with self-signed
+default; `camera_tls_verify off` is available for explicitly trusted cameras with self-signed
 certificates. ONVIF device connections bypass environment HTTP proxies.
 
 See `examples/camera-onvif.conf` for a complete camera file.
+
+## Native Reolink Baichuan input
+
+The native Baichuan transport is built into the `vibe-motion` process: it opens
+`media_port` (9000 by default), authenticates, receives the camera's H.264/HEVC
+access units, and feeds them directly into the existing FFmpeg decoder, packet
+ring, event writer, timelapse, and HTTP stream paths. It does not require
+Neolink, GStreamer, an RTSP proxy, or another sidecar process.
+
+```conf
+camera_id 12
+camera_name cam12
+
+camera_url http://192.0.2.12/onvif/device_service
+camera_userpass admin:password
+media_transport auto
+media_port 9000
+media_channel 0
+media_stream main
+
+# Optional camera-generated ONVIF motion events use the same URL and login.
+events on
+motion_detection off
+decode_frames auto
+
+width auto
+height auto
+movie_passthrough on
+movie_codec copy
+```
+
+`media_stream` accepts `main`, `sub`, or `extern`. `media_channel` defaults to
+zero. Baichuan media and ONVIF events remain independent even though they share
+the same camera address and credentials.
+
+Some Reolink models place an index rather than the real frame rate in their
+stream-info block. The bridge measures the actual cadence from Baichuan frame
+timestamps before exposing packets to FFmpeg, then supplies a monotonic
+constant-rate packet timeline. JSON status reports `input_transport` as
+`baichuan` and continues to report ONVIF subscription health separately.
+
+See `examples/camera-baichuan.conf` for a complete camera file.
 
 ## Migration from an existing Motion deployment
 
