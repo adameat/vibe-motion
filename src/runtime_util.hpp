@@ -36,8 +36,9 @@ inline bool onvif_identification_failure_is_fatal(bool onvif_client_present, std
 }
 
 inline bool auto_baichuan_open_failure_requires_reselection(std::string_view configured_transport,
-                                                            bool selected_baichuan) {
-    return configured_transport == "auto" && selected_baichuan;
+                                                            bool selected_baichuan,
+                                                            bool baichuan_established) {
+    return configured_transport == "auto" && selected_baichuan && !baichuan_established;
 }
 
 } // namespace vibe_motion::runtime_detail

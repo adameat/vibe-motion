@@ -808,6 +808,7 @@ class CameraWorker {
         }
         std::optional<SelectedMediaTransport> selected_transport;
         bool auto_skip_baichuan = false;
+        bool baichuan_established = false;
         if (config_.media_transport == "direct") {
             selected_transport = SelectedMediaTransport::direct;
         } else if (config_.media_transport == "onvif") {
@@ -954,7 +955,7 @@ class CameraWorker {
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": connect failed: ", redact_secrets(open_error));
                 if (runtime_detail::auto_baichuan_open_failure_requires_reselection(
-                        config_.media_transport, use_baichuan)) {
+                        config_.media_transport, use_baichuan, baichuan_established)) {
                     auto_skip_baichuan = true;
                     selected_transport.reset();
                 }
@@ -963,6 +964,7 @@ class CameraWorker {
                 }
                 continue;
             }
+            baichuan_established = baichuan_established || use_baichuan;
             FrameDecodeController decode_controller(configured_idle_decode_mode);
             auto reported_requested_mode = decode_controller.requested_mode();
             auto reported_active_mode = decode_controller.active_mode();
