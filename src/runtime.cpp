@@ -1064,6 +1064,9 @@ class CameraWorker {
                         .codec = config_.stream_codec,
                         .encoder = config_.stream_encoder,
                         .keyframe_interval = config_.stream_keyframe_interval,
+                        .preset = {},
+                        .threads = 0,
+                        .b_frames = 0,
                         .low_latency = true,
                     };
                     http_->publish_video(camera_key, sample.packet, stream_options);
@@ -1189,6 +1192,9 @@ class CameraWorker {
                             .codec = config_.movie_codec,
                             .encoder = config_.movie_encoder,
                             .keyframe_interval = config_.movie_keyframe_interval,
+                            .preset = {},
+                            .threads = 0,
+                            .b_frames = 0,
                         };
                         if (movie.open(movie_path.string(), source.stream_info(), movie_options,
                                        &error)) {
@@ -1259,6 +1265,9 @@ class CameraWorker {
                                 .codec = config_.timelapse_codec,
                                 .encoder = config_.timelapse_encoder,
                                 .keyframe_interval = config_.timelapse_keyframe_interval,
+                                .preset = config_.timelapse_preset,
+                                .threads = config_.timelapse_threads,
+                                .b_frames = config_.timelapse_b_frames,
                             };
                             if (!timelapse.open(path.string(), frame.width, frame.height,
                                                 config_.timelapse_fps, encode_options, &error)) {

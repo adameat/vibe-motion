@@ -1920,7 +1920,8 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         return false;
     }
     if (options.quality < 0 || options.quality > 100 || options.bitrate < 0 ||
-        options.keyframe_interval <= 0) {
+        options.keyframe_interval <= 0 || options.threads < 0 || options.threads > 64 ||
+        options.b_frames < 0 || options.b_frames > 16) {
         set_error(error, "invalid timelapse encoding options");
         return false;
     }
@@ -1949,24 +1950,40 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     impl_->encoder->framerate = AVRational{fps, 1};
     impl_->encoder->gop_size = std::max(fps * options.keyframe_interval, 1);
     impl_->encoder->keyint_min = impl_->encoder->gop_size;
-    impl_->encoder->max_b_frames = 0;
+    impl_->encoder->max_b_frames = options.b_frames;
+    if (options.threads > 0)
+        impl_->encoder->thread_count = options.threads;
     AVDictionary* codec_options = nullptr;
-    if (std::string(codec->name) == "libx264") {
+    if (!options.preset.empty())
+        av_dict_set(&codec_options, "preset", options.preset.c_str(), 0);
+    const std::string encoder_name = codec->name;
+    if (encoder_name == "libx264") {
         // One hourly encoder remains open per camera. Bound x264's otherwise
         // large 4K frame-thread/lookahead queues before the first packet.
-        impl_->encoder->thread_count = 1;
-        av_dict_set(&codec_options, "preset", "veryfast", 0);
-        av_dict_set(&codec_options, "tune", "zerolatency", 0);
-        av_dict_set(&codec_options, "x264-params",
-                    "threads=1:lookahead-threads=1:sync-lookahead=0:rc-lookahead=0:ref=1:"
-                    "bframes=0:scenecut=0",
-                    0);
+        if (options.threads == 0)
+            impl_->encoder->thread_count = 1;
+        if (options.preset.empty())
+            av_dict_set(&codec_options, "preset", "veryfast", 0);
+        if (options.b_frames == 0) {
+            av_dict_set(&codec_options, "tune", "zerolatency", 0);
+            av_dict_set(&codec_options, "x264-params",
+                        "lookahead-threads=1:sync-lookahead=0:rc-lookahead=0:ref=1:"
+                        "bframes=0:scenecut=0",
+                        0);
+        }
+    }
+    if (encoder_name == "libx265") {
+        std::string parameters = "log-level=error";
+        if (options.threads == 1)
+            parameters += ":pools=none:frame-threads=1:wpp=0";
+        else if (options.threads > 1)
+            parameters += ":pools=" + std::to_string(options.threads) +
+                          ":frame-threads=" + std::to_string(options.threads);
+        av_dict_set(&codec_options, "x265-params", parameters.c_str(), 0);
     }
     if (options.quality > 0 && (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC)) {
         const std::string crf = std::to_string((100 - options.quality) * 51 / 100);
         av_dict_set(&codec_options, "crf", crf.c_str(), 0);
-        if (std::string(codec->name) == "libx265")
-            av_dict_set(&codec_options, "x265-params", "log-level=error", 0);
     } else if (options.quality > 0) {
         const int quantizer = 31 - ((options.quality - 1) * 29 / 99);
         impl_->encoder->flags |= AV_CODEC_FLAG_QSCALE;

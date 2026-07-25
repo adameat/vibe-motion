@@ -93,6 +93,7 @@ static void test_packet_timestamp_normalization() {
 struct DecodedVideoStats {
     int frames = 0;
     int keyframes = 0;
+    int b_frames = 0;
     int discard_packets = 0;
     bool has_color = false;
     std::string codec;
@@ -132,6 +133,7 @@ static void receive_frames(AVCodecContext* decoder, AVFrame* frame, DecodedVideo
         }
         assert(result >= 0);
         ++stats.frames;
+        stats.b_frames += frame->pict_type == AV_PICTURE_TYPE_B ? 1 : 0;
         stats.has_color = stats.has_color || frame_has_color(frame);
         av_frame_unref(frame);
     }
@@ -292,6 +294,9 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .codec = transcode_codec,
             .encoder = {},
             .keyframe_interval = 1,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
         };
         EventMovieWriter transcoded_event;
         assert(transcoded_event.open(transcoded_event_path.string(), preroll.front().stream(),
@@ -333,7 +338,10 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         .bitrate = 0,
         .codec = "hevc",
         .encoder = {},
-        .keyframe_interval = 2,
+        .keyframe_interval = 60,
+        .preset = "ultrafast",
+        .threads = 1,
+        .b_frames = 2,
     };
     if (!has_hevc_encoder) {
         assert(!timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
@@ -347,6 +355,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     const auto timelapse_stats = decoded_video_stats(timelapse_path);
     assert(timelapse_stats.codec == "hevc");
     assert(timelapse_stats.frames == static_cast<int>(images.size()));
+    assert(timelapse_stats.keyframes == 1);
+    assert(timelapse_stats.b_frames > 0);
     assert(timelapse_stats.has_color);
 
     if (has_h264_encoder) {
@@ -360,6 +370,9 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .codec = "h264",
             .encoder = "libx264",
             .keyframe_interval = 2,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
         };
         assert(
             h264_timelapse.open(h264_timelapse_path.string(), 160, 120, 1, h264_options, &error));
@@ -500,6 +513,9 @@ int main(int, char** argv) {
             .codec = "mpeg4",
             .encoder = {},
             .keyframe_interval = 2,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
         };
         assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {

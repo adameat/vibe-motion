@@ -89,6 +89,9 @@ struct CameraConfig {
     int timelapse_quality = 0;
     int timelapse_bitrate = 0;
     int timelapse_keyframe_interval = 10;
+    std::string timelapse_preset;
+    int timelapse_threads = 0;
+    int timelapse_b_frames = 0;
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 

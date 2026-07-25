@@ -241,6 +241,11 @@ service remain visibly named `vibe-motion`.
   resolution-derived default and a positive value selects an explicit number
   of bits per second. `timelapse_keyframe_interval` sets the maximum distance
   between keyframes in output-video seconds; its default is 10.
+- `timelapse_preset` selects an x264/x265 speed preset.
+  `timelapse_threads` limits encoder threads (`0` keeps the encoder default),
+  and `timelapse_b_frames` enables bidirectionally predicted frames. For
+  low-CPU archival HEVC, a single thread, an `ultrafast` preset, B-frames, and
+  a long keyframe interval trade live-stream latency for much smaller files.
 - `stream_codec mjpeg` keeps only the Motion-compatible MJPEG routes.
   `stream_codec copy` enables packet-based fragmented-MP4 passthrough at
   `/<camera>/video.mp4`. A fixed `stream_codec h264|hevc` creates one

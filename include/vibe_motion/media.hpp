@@ -213,6 +213,10 @@ struct VideoEncodeOptions {
     std::string encoder;
     // Maximum distance between keyframes, measured in output-video seconds.
     int keyframe_interval = 10;
+    // Optional encoder preset plus explicit resource/compression controls.
+    std::string preset;
+    int threads = 0;
+    int b_frames = 0;
     // Web streaming favors bounded latency over encoder efficiency.
     bool low_latency = false;
     // Emit a separate fragmented-MP4 fragment for every encoded packet.

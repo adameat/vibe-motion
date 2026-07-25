@@ -305,6 +305,12 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.timelapse_bitrate = integer(value, location, key);
     else if (key == "timelapse_keyframe_interval")
         c.timelapse_keyframe_interval = integer(value, location, key);
+    else if (key == "timelapse_preset")
+        c.timelapse_preset = lower(trim(value));
+    else if (key == "timelapse_threads")
+        c.timelapse_threads = integer(value, location, key);
+    else if (key == "timelapse_b_frames")
+        c.timelapse_b_frames = integer(value, location, key);
     else if (key == "locate_motion_mode")
         c.locate_motion_mode = lower(trim(value));
     else if (key == "locate_motion_style")
@@ -568,6 +574,9 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "timelapse_quality " << c.timelapse_quality << '\n'
         << "timelapse_bitrate " << c.timelapse_bitrate << '\n'
         << "timelapse_keyframe_interval " << c.timelapse_keyframe_interval << '\n'
+        << "timelapse_preset " << c.timelapse_preset << '\n'
+        << "timelapse_threads " << c.timelapse_threads << '\n'
+        << "timelapse_b_frames " << c.timelapse_b_frames << '\n'
         << "locate_motion_mode " << c.locate_motion_mode << '\n'
         << "locate_motion_style " << c.locate_motion_style << '\n'
         << "on_event_start " << c.on_event_start << '\n'
@@ -736,6 +745,16 @@ void Config::validate() const {
                     "timelapse_bitrate must be between 0 and 1000000000");
         check_range(c.timelapse_keyframe_interval > 0 && c.timelapse_keyframe_interval <= 86400, c,
                     "timelapse_keyframe_interval must be between 1 and 86400");
+        static const std::set<std::string> encoder_presets{
+            "",       "ultrafast", "superfast", "veryfast", "faster",  "fast",
+            "medium", "slow",      "slower",    "veryslow", "placebo",
+        };
+        check_range(encoder_presets.contains(lower(trim(c.timelapse_preset))), c,
+                    "timelapse_preset is not a supported x264/x265 preset");
+        check_range(c.timelapse_threads >= 0 && c.timelapse_threads <= 64, c,
+                    "timelapse_threads must be between 0 and 64");
+        check_range(c.timelapse_b_frames >= 0 && c.timelapse_b_frames <= 16, c,
+                    "timelapse_b_frames must be between 0 and 16");
         check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
                     "only hourly timelapse_mode is implemented");
         const std::string timelapse_container = lower(trim(c.timelapse_container));
@@ -746,6 +765,9 @@ void Config::validate() const {
         check_range(
             timelapse_codec == "mpeg4" || timelapse_codec == "h264" || timelapse_codec == "hevc", c,
             "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
+        check_range(c.timelapse_preset.empty() || timelapse_codec == "h264" ||
+                        timelapse_codec == "hevc",
+                    c, "timelapse_preset requires H.264 or HEVC");
         check_range(timelapse_codec == "mpeg4" || timelapse_container != "mpeg4", c,
                     "H.264/HEVC timelapse requires the mkv or mp4 container");
         std::string selected_encoder;

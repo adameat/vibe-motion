@@ -510,6 +510,9 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             .codec = "copy",
             .encoder = {},
             .keyframe_interval = 10,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
             .low_latency = false,
             .fragment_every_frame = true,
         };
