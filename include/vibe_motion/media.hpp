@@ -217,6 +217,8 @@ struct VideoEncodeOptions {
     std::string preset;
     int threads = 0;
     int b_frames = 0;
+    std::string pixel_format = "yuv420p";
+    std::string x265_params;
     // Web streaming favors bounded latency over encoder efficiency.
     bool low_latency = false;
     // Emit a separate fragmented-MP4 fragment for every encoded packet.

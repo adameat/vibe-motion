@@ -231,6 +231,10 @@ service remain visibly named `vibe-motion`.
 - `timelapse_container mkv` is recommended for hourly timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.
+- `timelapse_interval` controls wall-clock sampling cadence, while
+  `timelapse_fps` controls only the playback rate of the output file. For
+  example, an interval of one second and an output rate of 30 fps produce
+  approximately 30x playback without encoding 30 source frames per second.
 - `timelapse_codec mpeg4|h264|hevc` selects the encoded codec independently of
   the container. `timelapse_encoder libx264|libx265` requests a software
   encoder explicitly; an empty encoder prefers the matching x264/x265
@@ -246,6 +250,11 @@ service remain visibly named `vibe-motion`.
   and `timelapse_b_frames` enables bidirectionally predicted frames. For
   low-CPU archival HEVC, a single thread, an `ultrafast` preset, B-frames, and
   a long keyframe interval trade live-stream latency for much smaller files.
+- `timelapse_pixel_format yuv420p|yuv420p10le` selects 8-bit Main or 10-bit
+  Main10 HEVC input precision. `timelapse_x265_params` appends advanced,
+  colon-separated libx265 parameters. Both settings are inherited normally,
+  so a camera file can override the archival profile without affecting the
+  other timelapse encoders.
 - `stream_codec mjpeg` keeps only the Motion-compatible MJPEG routes.
   `stream_codec copy` enables packet-based fragmented-MP4 passthrough at
   `/<camera>/video.mp4`. A fixed `stream_codec h264|hevc` creates one

@@ -6,6 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <algorithm>
@@ -98,27 +99,45 @@ struct DecodedVideoStats {
     bool has_color = false;
     std::string codec;
     std::string codec_tag;
+    std::string pixel_format;
+    AVRational frame_rate{0, 1};
+    AVRational nominal_frame_rate{0, 1};
 };
 
 static bool frame_has_color(const AVFrame* frame) {
     assert(frame != nullptr);
     const auto pixel_format = static_cast<AVPixelFormat>(frame->format);
-    assert(pixel_format == AV_PIX_FMT_YUV420P || pixel_format == AV_PIX_FMT_YUVJ420P);
+    const bool eight_bit =
+        pixel_format == AV_PIX_FMT_YUV420P || pixel_format == AV_PIX_FMT_YUVJ420P;
+    const bool ten_bit = pixel_format == AV_PIX_FMT_YUV420P10LE;
+    assert(eight_bit || ten_bit);
     assert(frame->data[1] != nullptr && frame->data[2] != nullptr);
 
     const int chroma_width = (frame->width + 1) / 2;
     const int chroma_height = (frame->height + 1) / 2;
     for (int plane = 1; plane <= 2; ++plane) {
         for (int row = 0; row < chroma_height; ++row) {
-            const auto* pixels =
+            const auto* bytes =
                 frame->data[plane] + static_cast<std::ptrdiff_t>(row) * frame->linesize[plane];
-            if (std::any_of(pixels, pixels + chroma_width, [](std::uint8_t value) {
-                    constexpr int neutral = 128;
-                    constexpr int tolerance = 8;
-                    const int chroma = value;
-                    return chroma < neutral - tolerance || chroma > neutral + tolerance;
-                })) {
-                return true;
+            if (eight_bit) {
+                if (std::any_of(bytes, bytes + chroma_width, [](std::uint8_t value) {
+                        constexpr int neutral = 128;
+                        constexpr int tolerance = 8;
+                        const int chroma = value;
+                        return chroma < neutral - tolerance || chroma > neutral + tolerance;
+                    })) {
+                    return true;
+                }
+            } else {
+                const auto* pixels = reinterpret_cast<const std::uint16_t*>(bytes);
+                if (std::any_of(pixels, pixels + chroma_width, [](std::uint16_t value) {
+                        constexpr int neutral = 512;
+                        constexpr int tolerance = 32;
+                        const int chroma = value;
+                        return chroma < neutral - tolerance || chroma > neutral + tolerance;
+                    })) {
+                    return true;
+                }
             }
         }
     }
@@ -134,6 +153,11 @@ static void receive_frames(AVCodecContext* decoder, AVFrame* frame, DecodedVideo
         assert(result >= 0);
         ++stats.frames;
         stats.b_frames += frame->pict_type == AV_PICTURE_TYPE_B ? 1 : 0;
+        if (stats.pixel_format.empty()) {
+            const char* pixel_format =
+                av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
+            stats.pixel_format = pixel_format != nullptr ? pixel_format : "unknown";
+        }
         stats.has_color = stats.has_color || frame_has_color(frame);
         av_frame_unref(frame);
     }
@@ -165,6 +189,8 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
     assert(packet != nullptr && frame != nullptr);
     DecodedVideoStats stats;
     stats.codec = avcodec_get_name(stream->codecpar->codec_id);
+    stats.frame_rate = av_guess_frame_rate(format, stream, nullptr);
+    stats.nominal_frame_rate = stream->r_frame_rate;
     if (stream->codecpar->codec_tag != 0) {
         for (unsigned int shift = 0; shift < 32; shift += 8)
             stats.codec_tag.push_back(
@@ -297,6 +323,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .preset = {},
             .threads = 0,
             .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         EventMovieWriter transcoded_event;
         assert(transcoded_event.open(transcoded_event_path.string(), preroll.front().stream(),
@@ -342,13 +370,15 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         .preset = "ultrafast",
         .threads = 1,
         .b_frames = 2,
+        .pixel_format = "yuv420p10le",
+        .x265_params = "ref=2:rc-lookahead=5",
     };
     if (!has_hevc_encoder) {
-        assert(!timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
         assert(error.find("unavailable") != std::string::npos);
         return;
     }
-    assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+    assert(timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
     for (const auto& image : images)
         assert(timelapse.write(image, &error));
     assert(timelapse.close(&error));
@@ -357,6 +387,10 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     assert(timelapse_stats.frames == static_cast<int>(images.size()));
     assert(timelapse_stats.keyframes == 1);
     assert(timelapse_stats.b_frames > 0);
+    assert(timelapse_stats.pixel_format == "yuv420p10le");
+    assert(av_cmp_q(timelapse_stats.nominal_frame_rate, AVRational{30, 1}) == 0);
+    assert(av_q2d(timelapse_stats.frame_rate) > 29.5);
+    assert(av_q2d(timelapse_stats.frame_rate) < 30.5);
     assert(timelapse_stats.has_color);
 
     if (has_h264_encoder) {
@@ -373,6 +407,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .preset = {},
             .threads = 0,
             .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         assert(
             h264_timelapse.open(h264_timelapse_path.string(), 160, 120, 1, h264_options, &error));
@@ -516,6 +552,8 @@ int main(int, char** argv) {
             .preset = {},
             .threads = 0,
             .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {

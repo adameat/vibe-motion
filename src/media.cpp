@@ -15,6 +15,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -1945,7 +1946,12 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     }
     impl_->encoder->width = width;
     impl_->encoder->height = height;
-    impl_->encoder->pix_fmt = AV_PIX_FMT_YUV420P;
+    impl_->encoder->pix_fmt = av_get_pix_fmt(options.pixel_format.c_str());
+    if (impl_->encoder->pix_fmt == AV_PIX_FMT_NONE) {
+        set_error(error, "unsupported timelapse pixel format: " + options.pixel_format);
+        impl_->close(nullptr);
+        return false;
+    }
     impl_->encoder->time_base = AVRational{1, fps};
     impl_->encoder->framerate = AVRational{fps, 1};
     impl_->encoder->gop_size = std::max(fps * options.keyframe_interval, 1);
@@ -1979,6 +1985,8 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         else if (options.threads > 1)
             parameters += ":pools=" + std::to_string(options.threads) +
                           ":frame-threads=" + std::to_string(options.threads);
+        if (!options.x265_params.empty())
+            parameters += ":" + options.x265_params;
         av_dict_set(&codec_options, "x265-params", parameters.c_str(), 0);
     }
     if (options.quality > 0 && (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC)) {
@@ -2023,6 +2031,8 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         return false;
     }
     impl_->stream->time_base = impl_->encoder->time_base;
+    impl_->stream->avg_frame_rate = impl_->encoder->framerate;
+    impl_->stream->r_frame_rate = impl_->encoder->framerate;
     if (impl_->format->oformat != nullptr &&
         (std::string(impl_->format->oformat->name).find("mp4") != std::string::npos ||
          std::string(impl_->format->oformat->name).find("mov") != std::string::npos)) {

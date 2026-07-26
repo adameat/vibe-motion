@@ -513,6 +513,8 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             .preset = {},
             .threads = 0,
             .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
             .low_latency = false,
             .fragment_every_frame = true,
         };

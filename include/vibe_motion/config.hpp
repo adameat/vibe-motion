@@ -92,6 +92,8 @@ struct CameraConfig {
     std::string timelapse_preset;
     int timelapse_threads = 0;
     int timelapse_b_frames = 0;
+    std::string timelapse_pixel_format = "yuv420p";
+    std::string timelapse_x265_params;
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 

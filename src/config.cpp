@@ -311,6 +311,10 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.timelapse_threads = integer(value, location, key);
     else if (key == "timelapse_b_frames")
         c.timelapse_b_frames = integer(value, location, key);
+    else if (key == "timelapse_pixel_format")
+        c.timelapse_pixel_format = lower(trim(value));
+    else if (key == "timelapse_x265_params")
+        c.timelapse_x265_params = trim(value);
     else if (key == "locate_motion_mode")
         c.locate_motion_mode = lower(trim(value));
     else if (key == "locate_motion_style")
@@ -577,6 +581,8 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "timelapse_preset " << c.timelapse_preset << '\n'
         << "timelapse_threads " << c.timelapse_threads << '\n'
         << "timelapse_b_frames " << c.timelapse_b_frames << '\n'
+        << "timelapse_pixel_format " << c.timelapse_pixel_format << '\n'
+        << "timelapse_x265_params " << c.timelapse_x265_params << '\n'
         << "locate_motion_mode " << c.locate_motion_mode << '\n'
         << "locate_motion_style " << c.locate_motion_style << '\n'
         << "on_event_start " << c.on_event_start << '\n'
@@ -755,6 +761,9 @@ void Config::validate() const {
                     "timelapse_threads must be between 0 and 64");
         check_range(c.timelapse_b_frames >= 0 && c.timelapse_b_frames <= 16, c,
                     "timelapse_b_frames must be between 0 and 16");
+        check_range(c.timelapse_pixel_format == "yuv420p" ||
+                        c.timelapse_pixel_format == "yuv420p10le",
+                    c, "timelapse_pixel_format must be yuv420p or yuv420p10le");
         check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
                     "only hourly timelapse_mode is implemented");
         const std::string timelapse_container = lower(trim(c.timelapse_container));
@@ -775,6 +784,12 @@ void Config::validate() const {
             c.timelapse_interval == 0 ||
                 video_encoder_available(c.timelapse_codec, c.timelapse_encoder, &selected_encoder),
             c, "requested timelapse encoder is unavailable or has the wrong codec");
+        check_range(c.timelapse_interval == 0 || c.timelapse_pixel_format == "yuv420p" ||
+                        selected_encoder == "libx265",
+                    c, "timelapse_pixel_format yuv420p10le requires libx265");
+        check_range(c.timelapse_interval == 0 || c.timelapse_x265_params.empty() ||
+                        selected_encoder == "libx265",
+                    c, "timelapse_x265_params requires libx265");
         check_range(c.stream_port >= 0 && c.stream_port <= 65535, c, "invalid stream_port");
         check_range(c.stream_maxrate > 0, c, "stream_maxrate must be positive");
         check_range(c.stream_codec == "mjpeg" || c.stream_codec == "copy" ||

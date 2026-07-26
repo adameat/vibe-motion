@@ -1069,6 +1069,8 @@ class CameraWorker {
                         .preset = {},
                         .threads = 0,
                         .b_frames = 0,
+                        .pixel_format = "yuv420p",
+                        .x265_params = {},
                         .low_latency = true,
                     };
                     http_->publish_video(camera_key, sample.packet, stream_options);
@@ -1197,6 +1199,8 @@ class CameraWorker {
                             .preset = {},
                             .threads = 0,
                             .b_frames = 0,
+                            .pixel_format = "yuv420p",
+                            .x265_params = {},
                         };
                         if (movie.open(movie_path.string(), source.stream_info(), movie_options,
                                        &error)) {
@@ -1270,6 +1274,8 @@ class CameraWorker {
                                 .preset = config_.timelapse_preset,
                                 .threads = config_.timelapse_threads,
                                 .b_frames = config_.timelapse_b_frames,
+                                .pixel_format = config_.timelapse_pixel_format,
+                                .x265_params = config_.timelapse_x265_params,
                             };
                             if (!timelapse.open(path.string(), frame.width, frame.height,
                                                 config_.timelapse_fps, encode_options, &error)) {

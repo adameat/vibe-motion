@@ -93,6 +93,8 @@ int main() {
     assert(deployment.cameras.front().timelapse_preset == "ultrafast");
     assert(deployment.cameras.front().timelapse_threads == 1);
     assert(deployment.cameras.front().timelapse_b_frames == 4);
+    assert(deployment.cameras.front().timelapse_pixel_format == "yuv420p10le");
+    assert(deployment.cameras.front().timelapse_x265_params == "ref=4:rc-lookahead=60");
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
 
@@ -102,6 +104,8 @@ int main() {
         camera.timelapse_codec = "mpeg4";
         camera.timelapse_encoder.clear();
         camera.timelapse_preset.clear();
+        camera.timelapse_pixel_format = "yuv420p";
+        camera.timelapse_x265_params.clear();
     }
     padded_container.validate();
 
@@ -209,6 +213,9 @@ int main() {
     assert(deployment_dump.find("timelapse_preset ultrafast") != std::string::npos);
     assert(deployment_dump.find("timelapse_threads 1") != std::string::npos);
     assert(deployment_dump.find("timelapse_b_frames 4") != std::string::npos);
+    assert(deployment_dump.find("timelapse_pixel_format yuv420p10le") != std::string::npos);
+    assert(deployment_dump.find("timelapse_x265_params ref=4:rc-lookahead=60") !=
+           std::string::npos);
     assert(deployment_dump.find("movie_codec copy") != std::string::npos);
     assert(deployment_dump.find("movie_bitrate 750000") != std::string::npos);
     assert(deployment_dump.find("movie_keyframe_interval 5") != std::string::npos);
@@ -288,6 +295,18 @@ int main() {
     expect_config_error([&] {
         Config invalid = deployment;
         invalid.cameras.front().timelapse_b_frames = 17;
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_pixel_format = "rgb24";
+        invalid.validate();
+    });
+    expect_config_error([&] {
+        Config invalid = deployment;
+        invalid.cameras.front().timelapse_interval = 1;
+        invalid.cameras.front().timelapse_codec = "h264";
+        invalid.cameras.front().timelapse_encoder = "libx264";
         invalid.validate();
     });
     expect_config_error([&] {
