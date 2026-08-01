@@ -1964,7 +1964,7 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         av_dict_set(&codec_options, "preset", options.preset.c_str(), 0);
     const std::string encoder_name = codec->name;
     if (encoder_name == "libx264") {
-        // One hourly encoder remains open per camera. Bound x264's otherwise
+        // One timelapse encoder remains open per camera. Bound x264's otherwise
         // large 4K frame-thread/lookahead queues before the first packet.
         if (options.threads == 0)
             impl_->encoder->thread_count = 1;

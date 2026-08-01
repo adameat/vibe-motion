@@ -265,7 +265,7 @@ class TimelapseWriter {
     TimelapseWriter(TimelapseWriter&&) noexcept;
     TimelapseWriter& operator=(TimelapseWriter&&) noexcept;
 
-    // The caller chooses the path and therefore controls hourly rotation.
+    // The caller chooses the path and therefore controls period rotation.
     bool open(const std::string& path, int width, int height, int fps,
               std::string* error = nullptr);
     bool open(const std::string& path, int width, int height, int fps,

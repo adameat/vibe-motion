@@ -3,7 +3,7 @@
 `vibe-motion` is a clean-room C++20 network-camera motion daemon built with the
 LLVM toolchain (Clang 22, libc++, libc++abi, and LLD). Its first
 compatibility target covers RTMP/RTSP input, motion masks and event grouping,
-snapshots, best event pictures, passthrough event movies, hourly timelapse,
+snapshots, best event pictures, passthrough event movies, hourly or daily timelapse,
 hooks, and an integrated MJPEG/status HTTP server.
 
 It deliberately does **not** support local V4L2/libcamera devices or databases.
@@ -228,7 +228,10 @@ service remain visibly named `vibe-motion`.
   and `movie_keyframe_interval` control that encoder. HEVC in MP4 is tagged
   as `hvc1`. Validate passthrough for every camera codec before production
   cutover.
-- `timelapse_container mkv` is recommended for hourly timelapse output. The
+- `timelapse_mode hourly|daily` rotates output on the corresponding local-time
+  boundary. With a filename template containing seconds, a process restart
+  starts a new timestamped fragment instead of resuming the existing container.
+- `timelapse_container mkv` is recommended for timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.
 - `timelapse_interval` controls wall-clock sampling cadence, while

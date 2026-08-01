@@ -206,6 +206,14 @@ int main() {
     assert(noise_dump.find("noise_tune off") != std::string::npos);
     assert(noise_dump.find("movie_all_frames off") != std::string::npos);
 
+    Config daily_timelapse = deployment;
+    daily_timelapse.cameras.at(1).timelapse_mode = "daily";
+    daily_timelapse.validate();
+
+    daily_timelapse.cameras.at(1).timelapse_mode = "weekly";
+    expect_config_error_message([&] { daily_timelapse.validate(); },
+                                "timelapse_mode must be hourly or daily");
+
     const std::string deployment_dump = deployment.dump_effective();
     assert(deployment_dump.find("timelapse_quality 72") != std::string::npos);
     assert(deployment_dump.find("timelapse_bitrate 600000") != std::string::npos);

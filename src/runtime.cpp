@@ -220,15 +220,6 @@ std::unordered_map<std::string, std::string> parse_netcam_options(const std::str
     return result;
 }
 
-std::string hour_key(std::chrono::system_clock::time_point when) {
-    const auto instant = std::chrono::system_clock::to_time_t(when);
-    std::tm local{};
-    localtime_r(&instant, &local);
-    char buffer[32]{};
-    std::strftime(buffer, sizeof(buffer), "%Y%m%d%H", &local);
-    return buffer;
-}
-
 struct WorkerStatus {
     bool connected = false;
     bool event_active = false;
@@ -789,7 +780,7 @@ class CameraWorker {
         EventMovieWriter movie;
         TimelapseWriter timelapse;
         std::filesystem::path movie_path;
-        std::string timelapse_hour;
+        std::string timelapse_period;
         std::vector<std::uint8_t> best_jpeg;
         GrayFrame best_frame;
         DetectionResult best_detection;
@@ -1254,11 +1245,12 @@ class CameraWorker {
                     const auto bucket = epoch_seconds / config_.timelapse_interval;
                     if (bucket != timelapse_bucket) {
                         timelapse_bucket = bucket;
-                        const auto current_hour = hour_key(frame.captured_at);
-                        if (current_hour != timelapse_hour) {
+                        const auto current_period = runtime_detail::timelapse_period_key(
+                            frame.captured_at, config_.timelapse_mode);
+                        if (current_period != timelapse_period) {
                             std::string error;
                             timelapse.close(&error);
-                            timelapse_hour = current_hour;
+                            timelapse_period = current_period;
                             auto values = context(detection, frame, events.event_number());
                             const auto path =
                                 output_path(config_.timelapse_filename,

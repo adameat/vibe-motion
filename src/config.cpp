@@ -764,8 +764,10 @@ void Config::validate() const {
         check_range(c.timelapse_pixel_format == "yuv420p" ||
                         c.timelapse_pixel_format == "yuv420p10le",
                     c, "timelapse_pixel_format must be yuv420p or yuv420p10le");
-        check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
-                    "only hourly timelapse_mode is implemented");
+        const std::string timelapse_mode = lower(trim(c.timelapse_mode));
+        check_range(c.timelapse_interval == 0 || timelapse_mode == "hourly" ||
+                        timelapse_mode == "daily",
+                    c, "timelapse_mode must be hourly or daily");
         const std::string timelapse_container = lower(trim(c.timelapse_container));
         check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
                         timelapse_container == "mpeg4" || timelapse_container == "mp4",
