@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -220,10 +221,16 @@ std::unordered_map<std::string, std::string> parse_netcam_options(const std::str
     return result;
 }
 
+void set_current_thread_name(const std::string& name) noexcept {
+    static_cast<void>(::pthread_setname_np(::pthread_self(), name.c_str()));
+}
+
 struct WorkerStatus {
     bool connected = false;
     bool event_active = false;
     std::uint64_t frames = 0;
+    std::uint64_t input_packets = 0;
+    std::uint64_t input_bytes = 0;
     std::uint64_t reconnects = 0;
     std::uint64_t changed_pixels = 0;
     std::uint64_t effective_threshold = 0;
@@ -237,6 +244,13 @@ struct WorkerStatus {
     std::string input_codec;
     std::string movie_codec;
     std::string timelapse_codec;
+    std::uint64_t timelapse_frames = 0;
+    std::uint64_t timelapse_packets = 0;
+    std::uint64_t timelapse_bytes = 0;
+    std::uint64_t timelapse_keyframes = 0;
+    std::uint64_t timelapse_write_us_total = 0;
+    std::uint64_t timelapse_write_us_last = 0;
+    std::uint64_t timelapse_write_us_max = 0;
     std::string stream_codec;
     std::string movie_error;
     std::string timelapse_error;
@@ -540,6 +554,7 @@ class CameraWorker {
     }
 
     void run_onvif_events() {
+        set_current_thread_name(runtime_detail::camera_thread_name(config_.camera_id, "onvif"));
         OnvifClient client(onvif_config());
         client.receive_motion_events(
             stopping_,
@@ -740,6 +755,11 @@ class CameraWorker {
     }
 
     void run() {
+        const std::string source_thread_name =
+            runtime_detail::camera_thread_name(config_.camera_id, "source");
+        const std::string timelapse_thread_name =
+            runtime_detail::camera_thread_name(config_.camera_id, "tl");
+        set_current_thread_name(source_thread_name);
         DetectionSettings detection_settings;
         detection_settings.threshold = static_cast<std::uint64_t>(config_.threshold);
         detection_settings.threshold_tune = config_.threshold_tune;
@@ -786,6 +806,8 @@ class CameraWorker {
         DetectionResult best_detection;
         std::int64_t snapshot_bucket = -1;
         std::int64_t timelapse_bucket = -1;
+        std::uint64_t input_packets = 0;
+        std::uint64_t input_bytes = 0;
         std::chrono::steady_clock::time_point last_http_publish{};
         bool record_live = false;
         std::uint64_t seen_onvif_trigger = 0;
@@ -812,6 +834,13 @@ class CameraWorker {
                                          configured_idle_decode_mode == FrameDecodeMode::keyframes;
         const std::string camera_key = std::to_string(config_.camera_id);
         timelapse.set_packet_callback([this, camera_key](const VideoPacket& packet) {
+            set_status([&](WorkerStatus& state) {
+                ++state.timelapse_packets;
+                state.timelapse_bytes += packet.size();
+                if (packet.keyframe()) {
+                    ++state.timelapse_keyframes;
+                }
+            });
             if (http_ != nullptr)
                 http_->publish_timelapse_video(camera_key, packet);
         });
@@ -1049,6 +1078,10 @@ class CameraWorker {
                 }
 
                 auto& sample = *read.sample;
+                if (sample.packet.valid()) {
+                    ++input_packets;
+                    input_bytes += sample.packet.size();
+                }
                 ring.push(sample.packet);
                 if (publish_video_packets && sample.packet.valid()) {
                     const VideoEncodeOptions stream_options{
@@ -1147,6 +1180,8 @@ class CameraWorker {
                 record_live = record_frame;
                 set_status([&](WorkerStatus& state) {
                     state.frames++;
+                    state.input_packets = input_packets;
+                    state.input_bytes = input_bytes;
                     state.changed_pixels = detection.changed_pixels;
                     state.effective_threshold = detection.effective_threshold;
                     state.effective_noise_level = detection.effective_noise_level;
@@ -1245,6 +1280,7 @@ class CameraWorker {
                     const auto bucket = epoch_seconds / config_.timelapse_interval;
                     if (bucket != timelapse_bucket) {
                         timelapse_bucket = bucket;
+                        set_current_thread_name(timelapse_thread_name);
                         const auto current_period = runtime_detail::timelapse_period_key(
                             frame.captured_at, config_.timelapse_mode);
                         if (current_period != timelapse_period) {
@@ -1284,17 +1320,33 @@ class CameraWorker {
                         }
                         std::string error;
                         if (timelapse.is_open()) {
+                            const auto write_started = std::chrono::steady_clock::now();
+                            bool written = false;
                             if (!sample.image) {
                                 error = "decoded color frame is unavailable";
-                            } else if (timelapse.write(*sample.image, &error)) {
+                            } else if ((written = timelapse.write(*sample.image, &error))) {
                                 error.clear();
                             }
+                            const auto write_us = static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - write_started)
+                                    .count());
+                            set_status([&](WorkerStatus& state) {
+                                if (written) {
+                                    ++state.timelapse_frames;
+                                }
+                                state.timelapse_write_us_total += write_us;
+                                state.timelapse_write_us_last = write_us;
+                                state.timelapse_write_us_max =
+                                    std::max(state.timelapse_write_us_max, write_us);
+                            });
                             if (!error.empty()) {
                                 Logger::instance().write(
                                     LogLevel::warning, "camera ", config_.camera_id,
                                     ": timelapse write: ", redact_secrets(error));
                             }
                         }
+                        set_current_thread_name(source_thread_name);
                     }
                 }
 
@@ -1447,6 +1499,8 @@ class Application::Impl {
                    << ",\"connected\":" << (state.connected ? "true" : "false")
                    << ",\"event_active\":" << (state.event_active ? "true" : "false")
                    << ",\"event\":" << state.event_number << ",\"frames\":" << state.frames
+                   << ",\"input_packets\":" << state.input_packets
+                   << ",\"input_bytes\":" << state.input_bytes
                    << ",\"changed_pixels\":" << state.changed_pixels
                    << ",\"threshold\":" << state.effective_threshold
                    << ",\"noise_level\":" << static_cast<unsigned>(state.effective_noise_level)
@@ -1460,6 +1514,13 @@ class Application::Impl {
                    << ",\"input_codec\":\"" << json_escape(state.input_codec) << "\""
                    << ",\"movie_codec\":\"" << json_escape(state.movie_codec) << "\""
                    << ",\"timelapse_codec\":\"" << json_escape(state.timelapse_codec) << "\""
+                   << ",\"timelapse_frames\":" << state.timelapse_frames
+                   << ",\"timelapse_packets\":" << state.timelapse_packets
+                   << ",\"timelapse_bytes\":" << state.timelapse_bytes
+                   << ",\"timelapse_keyframes\":" << state.timelapse_keyframes
+                   << ",\"timelapse_write_us_total\":" << state.timelapse_write_us_total
+                   << ",\"timelapse_write_us_last\":" << state.timelapse_write_us_last
+                   << ",\"timelapse_write_us_max\":" << state.timelapse_write_us_max
                    << ",\"stream_codec\":\"" << json_escape(state.stream_codec) << "\""
                    << ",\"movie_error\":\"" << json_escape(state.movie_error) << "\""
                    << ",\"timelapse_error\":\"" << json_escape(state.timelapse_error) << "\""

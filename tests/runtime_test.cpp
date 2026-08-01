@@ -25,6 +25,10 @@ int main() {
     assert(!auto_baichuan_open_failure_requires_reselection("auto", false, false));
     assert(!auto_baichuan_open_failure_requires_reselection("baichuan", true, false));
 
+    assert(camera_thread_name(12, "source") == "cam12-source");
+    assert(camera_thread_name(12, "tl") == "cam12-tl");
+    assert(camera_thread_name(123456, "long-role-name").size() == 15);
+
     const auto instant = std::chrono::system_clock::time_point{std::chrono::seconds{1704196800}};
     const std::string hourly = timelapse_period_key(instant, "hourly");
     const std::string daily = timelapse_period_key(instant, " DAILY ");

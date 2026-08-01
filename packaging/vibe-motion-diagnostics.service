@@ -1,0 +1,21 @@
+[Unit]
+Description=Export vibe-motion per-camera diagnostics to Graphite
+After=vibe-motion.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GRAPHITE_HOST=db
+Environment=GRAPHITE_PORT=2003
+Environment=VIBE_STATUS_URL=http://127.0.0.1:8892/status
+ExecStart=/usr/local/libexec/vibe-motion-graphite-exporter
+StateDirectory=vibe-motion-diagnostics
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=20s

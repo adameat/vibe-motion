@@ -210,6 +210,12 @@ with integrations that inspect parent process names. They are started with
 timeout without restarting camera workers. The daemon executable and systemd
 service remain visibly named `vibe-motion`.
 
+For production diagnosis, `packaging/vibe-motion-graphite-exporter.py` can be
+installed with its companion systemd service and timer. It exports process and
+named-thread CPU, per-camera input/output byte counters, successful timelapse
+frames, and timelapse write latency without changing camera, movie, event, or
+encoder settings.
+
 ## Compatibility notes
 
 - Main options are inherited when each `camera` directive is encountered.

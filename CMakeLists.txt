@@ -125,6 +125,10 @@ target_compile_options(vibe-motion PRIVATE ${VIBE_CLANG_WARNINGS})
 
 install(TARGETS vibe-motion RUNTIME DESTINATION bin)
 install(FILES packaging/vibe-motion.service DESTINATION lib/systemd/system)
+install(PROGRAMS packaging/vibe-motion-graphite-exporter.py
+  DESTINATION libexec RENAME vibe-motion-graphite-exporter)
+install(FILES packaging/vibe-motion-diagnostics.service
+  packaging/vibe-motion-diagnostics.timer DESTINATION lib/systemd/system)
 
 file(GLOB_RECURSE VIBE_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/include/*.hpp"

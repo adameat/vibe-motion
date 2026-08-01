@@ -44,6 +44,12 @@ inline bool auto_baichuan_open_failure_requires_reselection(std::string_view con
     return configured_transport == "auto" && selected_baichuan && !baichuan_established;
 }
 
+inline std::string camera_thread_name(int camera_id, std::string_view role) {
+    std::string result = "cam" + std::to_string(camera_id) + '-' + std::string(role);
+    result.resize(std::min<std::size_t>(result.size(), 15));
+    return result;
+}
+
 inline std::string timelapse_period_key(std::chrono::system_clock::time_point when,
                                         std::string_view mode) {
     const auto instant = std::chrono::system_clock::to_time_t(when);
