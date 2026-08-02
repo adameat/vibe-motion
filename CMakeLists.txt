@@ -131,10 +131,14 @@ install(FILES packaging/vibe-motion-diagnostics.service
   packaging/vibe-motion-diagnostics.timer DESTINATION lib/systemd/system)
 install(PROGRAMS packaging/vibe-motion-media-maintenance
   DESTINATION libexec)
+install(PROGRAMS packaging/vibe-motion-storage-graphite-exporter
+  DESTINATION libexec)
 install(FILES packaging/vibe-motion-event-compression.service
   packaging/vibe-motion-event-compression.timer
   packaging/vibe-motion-media-maintenance.service
-  packaging/vibe-motion-media-maintenance.timer DESTINATION lib/systemd/system)
+  packaging/vibe-motion-media-maintenance.timer
+  packaging/vibe-motion-storage-graphite.service
+  packaging/vibe-motion-storage-graphite.timer DESTINATION lib/systemd/system)
 
 file(GLOB_RECURSE VIBE_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/include/*.hpp"

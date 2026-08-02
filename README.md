@@ -223,6 +223,11 @@ runs with reduced CPU and I/O priority. `vibe-motion-media-maintenance.timer`
 replaces the legacy media-retention portion of `archive.sh`; review its paths
 and retention periods before enabling it on a new host.
 
+`vibe-motion-storage-graphite.timer` exports aggregate `/cam` space plus
+per-camera timelapse, event, archive, and external-media sizes and file counts.
+Set `GRAPHITE_PREFIX` in the service to preserve an existing metric namespace
+when moving collection to another host.
+
 ## Compatibility notes
 
 - Main options are inherited when each `camera` directive is encountered.
