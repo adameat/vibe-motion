@@ -56,14 +56,15 @@ def process_stat(path):
 def process_snapshot(pid):
     proc = Path("/proc") / str(pid)
     groups = {}
+    tasks = {}
     for task in (proc / "task").iterdir():
         try:
             name = task.joinpath("comm").read_text().strip()
             ticks = process_stat(task / "stat")
         except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
             continue
-        entry = groups.setdefault(name, {"ticks": 0, "threads": 0})
-        entry["ticks"] += ticks
+        tasks[task.name] = {"name": name, "ticks": ticks}
+        entry = groups.setdefault(name, {"threads": 0})
         entry["threads"] += 1
 
     rss_bytes = 0
@@ -75,7 +76,32 @@ def process_snapshot(pid):
         "ticks": process_stat(proc / "stat"),
         "rss_bytes": rss_bytes,
         "groups": groups,
+        "tasks": tasks,
     }
+
+
+def thread_cpu_ticks(snapshot, previous):
+    """Attribute CPU only when the same TID kept the same name for the interval.
+
+    A camera source thread is temporarily renamed while it submits a timelapse
+    frame. Comparing totals grouped only by the name visible at each sample can
+    therefore assign that thread's lifetime CPU to the wrong group. TID deltas
+    avoid that inflation; intervals crossing a rename are reported separately
+    because their CPU cannot be split reliably from two snapshots.
+    """
+    attributed = {}
+    unattributed = 0
+    old_tasks = previous.get("tasks", {})
+    for tid, task in snapshot["tasks"].items():
+        old = old_tasks.get(tid)
+        if not old or task["ticks"] < old.get("ticks", 0):
+            continue
+        delta = task["ticks"] - old["ticks"]
+        if task["name"] == old.get("name"):
+            attributed[task["name"]] = attributed.get(task["name"], 0) + delta
+        else:
+            unattributed += delta
+    return attributed, unattributed
 
 
 def available_memory_bytes():
@@ -239,19 +265,23 @@ def main():
             100.0 / CLK_TCK,
         )
 
-    old_groups = previous.get("groups", {}) if same_process else {}
+    attributed_ticks = {}
+    unattributed_ticks = 0
+    if same_process and previous.get("tasks"):
+        attributed_ticks, unattributed_ticks = thread_cpu_ticks(snapshot, previous)
+        add_metric(
+            metrics,
+            "process.thread_cpu_unattributed_percent",
+            unattributed_ticks * 100.0 / CLK_TCK / elapsed,
+        )
     for name, group in snapshot["groups"].items():
         component = metric_component(name)
         add_metric(metrics, f"thread_group.{component}.threads", group["threads"])
-        old = old_groups.get(name)
-        if old:
-            add_rate(
+        if name in attributed_ticks:
+            add_metric(
                 metrics,
                 f"thread_group.{component}.cpu_percent",
-                group["ticks"],
-                old.get("ticks", 0),
-                elapsed,
-                100.0 / CLK_TCK,
+                attributed_ticks[name] * 100.0 / CLK_TCK / elapsed,
             )
 
     camera_state = camera_metrics(
@@ -263,7 +293,7 @@ def main():
             "timestamp": now,
             "pid": pid,
             "process_ticks": snapshot["ticks"],
-            "groups": snapshot["groups"],
+            "tasks": snapshot["tasks"],
             "cameras": camera_state,
         }
     )
