@@ -216,6 +216,13 @@ named-thread CPU, per-camera input/output byte counters, successful timelapse
 frames, and timelapse write latency without changing camera, movie, event, or
 encoder settings.
 
+Existing deployments that queue event-video conversion through
+`/etc/motion/motion.py` can run that queue locally with
+`vibe-motion-event-compression.timer`. The worker is limited to one CPU and
+runs with reduced CPU and I/O priority. `vibe-motion-media-maintenance.timer`
+replaces the legacy media-retention portion of `archive.sh`; review its paths
+and retention periods before enabling it on a new host.
+
 ## Compatibility notes
 
 - Main options are inherited when each `camera` directive is encountered.

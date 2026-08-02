@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -eu
+
+find /cam/timelapse -mtime +1 -empty -type f -delete
+find /cam/timelapse -empty -type d -delete
+find /cam/events -mtime +1 -empty -type f -delete
+find /cam/events -empty -type d -delete
+find /cam/events -mtime +15 -type f -delete
+find /cam/snapshot -type f -mmin +2 -delete
+find /cam -name 'cam??-*.lock' -ctime +1 -delete
+find /cam/archive -mtime +15 -type f -delete
+find /cam/archive -mtime +1 -empty -type d -delete
+find /cam/archive -mtime +1 -empty -type f -delete
+find /cam/ext -mtime +2 -type f -delete
+find /cam/ext -empty -type d -delete
+
+while IFS= read -r -d '' snapshot_dir; do
+    camera_name=$(basename "$snapshot_dir")
+    ffmpeg \
+        -hide_banner \
+        -loglevel error \
+        -f lavfi \
+        -i 'color=black:s=480x360:d=1' \
+        -vf "geq=lum='random(0)*255',format=gray,drawtext=text='${camera_name}':x=(w-text_w)/2:y=(h-text_h)/2:fontsize=40:fontcolor=white" \
+        -frames:v 1 \
+        -y \
+        "${snapshot_dir}/lastsnaps.jpg"
+done < <(find /cam/snapshot -type d -empty -print0)

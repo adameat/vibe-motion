@@ -129,6 +129,12 @@ install(PROGRAMS packaging/vibe-motion-graphite-exporter.py
   DESTINATION libexec RENAME vibe-motion-graphite-exporter)
 install(FILES packaging/vibe-motion-diagnostics.service
   packaging/vibe-motion-diagnostics.timer DESTINATION lib/systemd/system)
+install(PROGRAMS packaging/vibe-motion-media-maintenance
+  DESTINATION libexec)
+install(FILES packaging/vibe-motion-event-compression.service
+  packaging/vibe-motion-event-compression.timer
+  packaging/vibe-motion-media-maintenance.service
+  packaging/vibe-motion-media-maintenance.timer DESTINATION lib/systemd/system)
 
 file(GLOB_RECURSE VIBE_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/include/*.hpp"
