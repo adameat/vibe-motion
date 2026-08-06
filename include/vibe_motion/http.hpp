@@ -22,7 +22,8 @@ struct HttpServerOptions {
     std::string bind_address = "0.0.0.0";
     std::uint16_t port = 8081;
     std::size_t max_clients = 64;
-    std::chrono::milliseconds write_timeout{2000};
+    // Maximum time a client socket may make no forward write progress.
+    std::chrono::milliseconds write_timeout{15000};
 };
 
 struct PublishedJpeg {
@@ -72,7 +73,8 @@ class HttpServer {
 
     void accept_loop();
     void handle_client(const std::shared_ptr<Client>& client);
-    bool send_all(int fd, const void* data, std::size_t size) const;
+    bool send_all(int fd, const void* data, std::size_t size,
+                  std::string* failure_reason = nullptr) const;
     bool send_text(int fd, int status, const std::string& reason, const std::string& content_type,
                    const std::string& body, bool close = true) const;
     std::string root_page() const;

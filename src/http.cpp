@@ -1,5 +1,7 @@
 #include "vibe_motion/http.hpp"
 
+#include "vibe_motion/log.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -252,31 +254,48 @@ bool HttpServer::wants_jpeg(const std::string& camera_id) const {
            (requests != frame_requests_.end() && requests->second > 0);
 }
 
-bool HttpServer::send_all(int fd, const void* data, std::size_t size) const {
+bool HttpServer::send_all(int fd, const void* data, std::size_t size,
+                          std::string* failure_reason) const {
+    const auto fail = [failure_reason](std::string reason) {
+        if (failure_reason != nullptr)
+            *failure_reason = std::move(reason);
+        return false;
+    };
     const auto* current = static_cast<const std::uint8_t*>(data);
-    const auto deadline = std::chrono::steady_clock::now() + options_.write_timeout;
+    auto deadline = std::chrono::steady_clock::now() + options_.write_timeout;
     while (size > 0 && running_.load()) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
         if (remaining.count() <= 0) {
-            return false;
+            return fail("write timeout after " + std::to_string(options_.write_timeout.count()) +
+                        " ms");
         }
         pollfd descriptor{fd, POLLOUT, 0};
         const int ready = ::poll(&descriptor, 1, static_cast<int>(remaining.count()));
-        if (ready <= 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-            return false;
-        }
+        if (ready == 0)
+            return fail("write poll timeout after " +
+                        std::to_string(options_.write_timeout.count()) + " ms");
+        if (ready < 0)
+            return fail("write poll failed: " + std::string(std::strerror(errno)));
+        if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+            return fail("socket closed while writing (poll revents=" +
+                        std::to_string(descriptor.revents) + ")");
         const ssize_t sent = ::send(fd, current, size, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (sent < 0 && (errno == EAGAIN || errno == EINTR)) {
             continue;
         }
-        if (sent <= 0) {
-            return false;
-        }
+        if (sent < 0)
+            return fail("send failed: " + std::string(std::strerror(errno)));
+        if (sent == 0)
+            return fail("send returned zero bytes");
         current += sent;
         size -= static_cast<std::size_t>(sent);
+        // Slow clients may need longer than write_timeout to receive a large
+        // frame in total. Only abort when the socket makes no progress for the
+        // full timeout period.
+        deadline = std::chrono::steady_clock::now() + options_.write_timeout;
     }
-    return size == 0;
+    return size == 0 ? true : fail("HTTP server stopping");
 }
 
 bool HttpServer::send_text(int fd, int status, const std::string& reason,
@@ -607,6 +626,8 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         std::string error;
         struct StreamOutputState {
             std::vector<std::uint8_t> initialization;
+            std::string send_error;
+            std::uint64_t bytes_sent = 0;
             bool initialized = false;
         };
         const auto output_state = std::make_shared<StreamOutputState>();
@@ -618,7 +639,10 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                                                             bytes, bytes + size);
                         return true;
                     }
-                    return send_all(fd, bytes, size);
+                    if (!send_all(fd, bytes, size, &output_state->send_error))
+                        return false;
+                    output_state->bytes_sent += size;
+                    return true;
                 },
                 &error)) {
             (void)send_text(client->fd, 503, "Service Unavailable", "text/plain", error + "\n");
@@ -627,20 +651,31 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         const std::string headers =
             "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
             "Connection: close\r\n\r\n";
-        if (!send_all(client->fd, headers.data(), headers.size()) ||
+        if (!send_all(client->fd, headers.data(), headers.size(), &output_state->send_error) ||
             !send_all(client->fd, output_state->initialization.data(),
-                      output_state->initialization.size()))
+                      output_state->initialization.size(), &output_state->send_error)) {
+            Logger::instance().write(
+                LogLevel::info, "web stream end camera=", camera,
+                " format=mp4 duration_ms=0 bytes=0 reason=", output_state->send_error);
             return;
+        }
+        output_state->bytes_sent = headers.size() + output_state->initialization.size();
         output_state->initialized = true;
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             ++video_stream_clients_[camera];
         }
+        const auto stream_started = std::chrono::steady_clock::now();
+        Logger::instance().write(
+            LogLevel::info, "web stream start camera=", camera,
+            " format=mp4 codec=", initial.front().packet.stream().codec_name());
         std::uint64_t delivered = 0;
+        std::uint64_t packets_sent = 0;
         for (const auto& packet : initial) {
             if (!writer.write(packet.packet, &error))
                 break;
             delivered = packet.version;
+            ++packets_sent;
         }
         while (running_.load() && error.empty()) {
             PublishedVideoPacket next;
@@ -665,6 +700,7 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             if (!writer.write(next.packet, &error))
                 break;
             delivered = next.version;
+            ++packets_sent;
         }
         writer.close(nullptr);
         {
@@ -673,6 +709,16 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             if (found != video_stream_clients_.end() && --found->second == 0)
                 video_stream_clients_.erase(found);
         }
+        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - stream_started)
+                                     .count();
+        const std::string reason = !output_state->send_error.empty() ? output_state->send_error
+                                   : !error.empty()                  ? error
+                                   : !running_.load()                ? "HTTP server stopping"
+                                                                     : "stream loop ended";
+        Logger::instance().write(LogLevel::info, "web stream end camera=", camera,
+                                 " format=mp4 duration_ms=", duration_ms, " packets=", packets_sent,
+                                 " bytes=", output_state->bytes_sent, " reason=", reason);
         return;
     }
     if (action != "/mjpg" && action != "/mjpg/stream") {
@@ -685,7 +731,11 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         std::string("HTTP/1.1 200 OK\r\n") +
         "Content-Type: multipart/x-mixed-replace; boundary=" + boundary +
         "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
-    if (!send_all(client->fd, stream_headers.data(), stream_headers.size())) {
+    std::string send_error;
+    if (!send_all(client->fd, stream_headers.data(), stream_headers.size(), &send_error)) {
+        Logger::instance().write(
+            LogLevel::info, "web stream end camera=", camera,
+            " format=mjpeg duration_ms=0 frames=0 bytes=0 reason=", send_error);
         client->done.store(true);
         return;
     }
@@ -693,7 +743,11 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
         std::lock_guard<std::mutex> lock(frames_mutex_);
         ++stream_clients_[camera];
     }
+    const auto stream_started = std::chrono::steady_clock::now();
+    Logger::instance().write(LogLevel::info, "web stream start camera=", camera, " format=mjpeg");
     std::uint64_t delivered = 0;
+    std::uint64_t frames_sent = 0;
+    std::uint64_t bytes_sent = stream_headers.size();
     while (running_.load()) {
         PublishedJpeg frame;
         {
@@ -714,11 +768,13 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
              << "\r\nX-Timestamp: " << http_date(frame.captured_at) << "\r\n\r\n";
         const auto part_header = part.str();
         static constexpr char trailer[] = "\r\n";
-        if (!send_all(client->fd, part_header.data(), part_header.size()) ||
-            !send_all(client->fd, frame.bytes->data(), frame.bytes->size()) ||
-            !send_all(client->fd, trailer, sizeof(trailer) - 1)) {
+        if (!send_all(client->fd, part_header.data(), part_header.size(), &send_error) ||
+            !send_all(client->fd, frame.bytes->data(), frame.bytes->size(), &send_error) ||
+            !send_all(client->fd, trailer, sizeof(trailer) - 1, &send_error)) {
             break;
         }
+        bytes_sent += part_header.size() + frame.bytes->size() + sizeof(trailer) - 1;
+        ++frames_sent;
         delivered = frame.version;
     }
     {
@@ -728,6 +784,15 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             stream_clients_.erase(iterator);
         }
     }
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - stream_started)
+                                 .count();
+    const std::string reason = !send_error.empty() ? send_error
+                               : !running_.load()  ? "HTTP server stopping"
+                                                   : "stream loop ended";
+    Logger::instance().write(LogLevel::info, "web stream end camera=", camera,
+                             " format=mjpeg duration_ms=", duration_ms, " frames=", frames_sent,
+                             " bytes=", bytes_sent, " reason=", reason);
     client->done.store(true);
 }
 
