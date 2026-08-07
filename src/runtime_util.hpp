@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,22 @@ inline std::string camera_thread_name(int camera_id, std::string_view role) {
     std::string result = "cam" + std::to_string(camera_id) + '-' + std::string(role);
     result.resize(std::min<std::size_t>(result.size(), 15));
     return result;
+}
+
+inline int snapshot_phase_seconds(int camera_id, int interval_seconds) {
+    if (interval_seconds <= 0) {
+        throw std::invalid_argument("snapshot interval must be positive");
+    }
+    const auto interval = static_cast<std::int64_t>(interval_seconds);
+    // Multiplication keeps adjacent camera ids from occupying adjacent seconds.
+    const auto camera = static_cast<std::int64_t>(camera_id) * 19;
+    return static_cast<int>((camera % interval + interval) % interval);
+}
+
+inline std::int64_t snapshot_bucket_at(std::int64_t epoch_seconds, int interval_seconds,
+                                       int camera_id) {
+    const auto phase = snapshot_phase_seconds(camera_id, interval_seconds);
+    return (epoch_seconds - phase) / interval_seconds;
 }
 
 inline std::string timelapse_period_key(std::chrono::system_clock::time_point when,

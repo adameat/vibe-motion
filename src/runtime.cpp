@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -85,6 +86,17 @@ std::string json_escape(const std::string& value) {
 
 std::string error_message(int error) {
     return error == 0 ? std::string{} : std::error_code(error, std::generic_category()).message();
+}
+
+void wake_event_worker() noexcept {
+    constexpr const char* wake_fifo = "/run/vibe-motion-event-worker/wake";
+    const int descriptor = ::open(wake_fifo, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (descriptor < 0) {
+        return;
+    }
+    const char wake = 'j';
+    static_cast<void>(::write(descriptor, &wake, sizeof(wake)));
+    ::close(descriptor);
 }
 
 void append_json_map(std::ostringstream& output, const std::map<std::string, std::string>& values) {
@@ -648,7 +660,8 @@ class CameraWorker {
 
     void hook(const std::string& command, const ExpansionContext& values,
               std::chrono::system_clock::time_point when, const std::string& kind,
-              HookPriority priority = HookPriority::normal, std::string coalesce_key = {}) {
+              HookPriority priority = HookPriority::normal, std::string coalesce_key = {},
+              HookCompletion completion = {}) {
         if (command.empty()) {
             return;
         }
@@ -662,7 +675,8 @@ class CameraWorker {
                                 .kind = kind,
                                 .camera_id = config_.camera_id,
                                 .serial_key = "camera:" + std::to_string(config_.camera_id),
-                                .coalesce_key = std::move(coalesce_key)})) {
+                                .coalesce_key = std::move(coalesce_key)},
+                               std::move(completion))) {
                 const auto status = hooks_.status();
                 Logger::instance().write(
                     LogLevel::warning, "camera ", config_.camera_id, ": hook dropped kind=", kind,
@@ -745,8 +759,8 @@ class CameraWorker {
                  HookPriority::critical);
         }
         if (movie_values) {
-            hook(config_.on_movie_end, *movie_values, end_when, "movie-end",
-                 HookPriority::critical);
+            hook(config_.on_movie_end, *movie_values, end_when, "movie-end", HookPriority::critical,
+                 {}, [](const HookResult&) { wake_event_worker(); });
         }
         movie_path.clear();
         best_jpeg.clear();
@@ -1263,8 +1277,15 @@ class CameraWorker {
                                                .count();
                 bool snapshot_due = false;
                 if (config_.snapshot_interval > 0) {
-                    const auto bucket = epoch_seconds / config_.snapshot_interval;
-                    if (bucket != snapshot_bucket) {
+                    const auto snapshot_epoch_seconds =
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+                    const auto bucket = runtime_detail::snapshot_bucket_at(
+                        snapshot_epoch_seconds, config_.snapshot_interval, config_.camera_id);
+                    if (snapshot_bucket < 0) {
+                        snapshot_bucket = bucket;
+                    } else if (bucket > snapshot_bucket) {
                         snapshot_bucket = bucket;
                         snapshot_due = true;
                         try {
@@ -1389,6 +1410,7 @@ class CameraWorker {
                 }
             }
             source.close();
+            snapshot_bucket = -1;
             if (events.active()) {
                 const auto stopped = events.stop();
                 finish_event(movie, movie_path, best_jpeg, best_frame, best_detection,

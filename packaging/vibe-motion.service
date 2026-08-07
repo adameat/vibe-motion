@@ -1,7 +1,7 @@
 [Unit]
 Description=vibe-motion network camera monitor
-After=network-online.target
-Wants=network-online.target
+After=network-online.target vibe-motion-event-compression.service
+Wants=network-online.target vibe-motion-event-compression.service
 
 [Service]
 Type=simple
@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/cam /var/log/motion
+ReadWritePaths=/cam /var/log/motion /run/vibe-motion-event-worker
 LimitNOFILE=65536
 
 [Install]

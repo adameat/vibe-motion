@@ -218,8 +218,13 @@ encoder settings.
 
 Existing deployments that queue event-video conversion through
 `/etc/motion/motion.py` can run that queue locally with
-`vibe-motion-event-compression.timer`. The worker is limited to one CPU and
-runs with reduced CPU and I/O priority. `vibe-motion-media-maintenance.timer`
+`vibe-motion-event-compression.service`. It processes one queued job per legacy
+handler invocation, immediately checks for another completed job, waits ten
+seconds after an empty check, and runs the legacy `periodic` handler once per
+minute. A completed `on_movie_end` hook wakes an idle worker through
+`/run/vibe-motion-event-worker/wake`. The worker is limited to one CPU and runs
+with reduced CPU and I/O priority. Disable the legacy `motion_periodic` cron
+entry when enabling this service. `vibe-motion-media-maintenance.timer`
 replaces the legacy media-retention portion of `archive.sh`; review its paths
 and retention periods before enabling it on a new host.
 
@@ -239,6 +244,10 @@ when moving collection to another host.
 - Pending periodic snapshot hooks are coalesced per camera. Event lifecycle and
   movie completion hooks have priority and may evict a superseded snapshot when
   the bounded queue is full.
+- Periodic snapshots use a stable camera-id phase on the system clock within
+  `snapshot_interval`. Startup and reconnect arm the next phase instead of
+  writing an immediate catch-up snapshot, so camera timestamp jumps cannot make
+  the writers converge again.
 - MP4/MKV passthrough begins from the latest buffered keyframe and rebases
   packet timestamps. `movie_codec copy` preserves the camera codec. A fixed
   `movie_codec h264|hevc` decodes and re-encodes the same packet stream;

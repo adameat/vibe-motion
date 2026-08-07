@@ -1,15 +1,24 @@
 [Unit]
-Description=Compress queued motion event videos for camka
+Description=Process motion events and periodic maintenance for camka
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/cam
 
 [Service]
-Type=oneshot
+Type=simple
 WorkingDirectory=/etc/motion
-ExecStart=/usr/bin/python3 /etc/motion/motion.py jobs camka
+ExecStart=/usr/local/libexec/vibe-motion-event-worker --sender camka --periodic-cameras 3,4,10,11,12,13,14,15 --periodic-iterations 5 --periodic-interval 60 --idle-delay 10 --wake-fifo /run/vibe-motion-event-worker/wake
+Restart=always
+RestartSec=10s
+RuntimeDirectory=vibe-motion-event-worker
+RuntimeDirectoryMode=0770
+Group=motion
+UMask=0007
 Nice=10
 CPUQuota=100%
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6
-TimeoutStartSec=2h
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target
