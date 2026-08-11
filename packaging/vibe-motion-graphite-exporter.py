@@ -106,32 +106,6 @@ def thread_cpu_ticks(snapshot, previous):
     return attributed, unattributed
 
 
-def memory_snapshot(path=Path("/proc/meminfo")):
-    values = {}
-    for line in path.read_text().splitlines():
-        name, separator, remainder = line.partition(":")
-        if separator and name in {"MemTotal", "MemAvailable"}:
-            values[name] = int(remainder.split()[0]) * 1024
-
-    missing = {"MemTotal", "MemAvailable"} - values.keys()
-    if missing:
-        raise RuntimeError(f"missing fields in {path}: {', '.join(sorted(missing))}")
-
-    total = values["MemTotal"]
-    available = values["MemAvailable"]
-    if total <= 0 or not 0 <= available <= total:
-        raise RuntimeError(
-            f"invalid memory values in {path}: total={total}, available={available}"
-        )
-
-    used = total - available
-    return {
-        "total_bytes": total,
-        "available_bytes": available,
-        "used_bytes": used,
-    }
-
-
 def load_state():
     try:
         return json.loads(STATE_PATH.read_text())
@@ -263,7 +237,6 @@ def main():
     pid = main_pid()
     status = read_status()
     snapshot = process_snapshot(pid)
-    memory = memory_snapshot()
     previous = load_state()
     elapsed = now - previous.get("timestamp", now)
     same_process = previous.get("pid") == pid and elapsed > 0
@@ -271,11 +244,6 @@ def main():
 
     add_metric(metrics, "diagnostics.heartbeat", 1)
     add_metric(metrics, "process.rss_bytes", snapshot["rss_bytes"])
-    # Keep the legacy path for existing dashboards while exposing host memory
-    # as a validated, self-contained snapshot for direct use by alerts.
-    add_metric(metrics, "process.available_memory_bytes", memory["available_bytes"])
-    for name, value in memory.items():
-        add_metric(metrics, f"host.memory.{name}", value)
     add_metric(
         metrics,
         "process.threads",
