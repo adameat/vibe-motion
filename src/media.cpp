@@ -181,18 +181,22 @@ bool allocate_video_frame(AVFrame* frame, AVPixelFormat format, int width, int h
 } // namespace
 
 bool video_encoder_available(const std::string& codec, const std::string& encoder,
-                             std::string* selected_encoder) {
+                             std::string* selected_encoder, const std::string& pixel_format) {
     const AVCodec* selected = find_requested_encoder(codec, encoder);
     if (selected_encoder != nullptr) {
         *selected_encoder = selected != nullptr ? selected->name : std::string{};
     }
     if (selected == nullptr)
         return false;
+    const AVPixelFormat requested_pixel_format = av_get_pix_fmt(pixel_format.c_str());
+    if (requested_pixel_format == AV_PIX_FMT_NONE)
+        return false;
     static std::mutex cache_mutex;
     static std::map<std::string, bool> cache;
+    const std::string cache_key = std::string(selected->name) + '\n' + pixel_format;
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        if (const auto found = cache.find(selected->name); found != cache.end())
+        if (const auto found = cache.find(cache_key); found != cache.end())
             return found->second;
     }
     auto context = CodecPtr(avcodec_alloc_context3(selected));
@@ -200,7 +204,7 @@ bool video_encoder_available(const std::string& codec, const std::string& encode
         return false;
     context->width = 64;
     context->height = 64;
-    context->pix_fmt = AV_PIX_FMT_YUV420P;
+    context->pix_fmt = requested_pixel_format;
     context->time_base = AVRational{1, 1};
     context->framerate = AVRational{1, 1};
     context->gop_size = 10;
@@ -213,7 +217,7 @@ bool video_encoder_available(const std::string& codec, const std::string& encode
     const bool available = result >= 0;
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        cache[selected->name] = available;
+        cache[cache_key] = available;
     }
     return available;
 }
@@ -1926,8 +1930,14 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         set_error(error, "invalid timelapse encoding options");
         return false;
     }
-    if (!video_encoder_available(options.codec, options.encoder)) {
+    std::string selected_encoder;
+    if (!video_encoder_available(options.codec, options.encoder, &selected_encoder,
+                                 options.pixel_format)) {
         set_error(error, "requested timelapse encoder is unavailable or cannot be opened");
+        return false;
+    }
+    if (selected_encoder == "libx265" && options.threads > 16) {
+        set_error(error, "libx265 timelapse threads cannot exceed 16");
         return false;
     }
     int result = avformat_alloc_output_context2(&impl_->format, nullptr, nullptr, path.c_str());

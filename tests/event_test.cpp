@@ -41,5 +41,14 @@ int main() {
     decision = externally_confirmed.update(true, start, true);
     assert(decision.event_started && decision.motion_detected && decision.event_number == 1);
 
+    EventStateMachine capped({1, 30s, 0, 10min});
+    decision = capped.update(true, start);
+    assert(decision.event_started && decision.event_number == 1);
+    assert(!capped.update(true, start + 599s).event_ended);
+    decision = capped.update(true, start + 600s);
+    assert(decision.event_ended && !capped.active() && decision.event_number == 1);
+    decision = capped.update(true, start + 601s);
+    assert(decision.event_started && capped.active() && decision.event_number == 2);
+
     std::cout << "event tests passed\n";
 }

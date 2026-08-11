@@ -8,6 +8,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace vibe_motion::runtime_detail {
 
@@ -38,6 +41,53 @@ inline bool http_camera_url(std::string_view url) {
 inline bool onvif_identification_failure_is_fatal(bool onvif_client_present, std::string_view url) {
     return onvif_client_present && contains_case_insensitive(url, "/onvif/");
 }
+
+inline bool onvif_topic_holds_motion_state(std::string_view topic) {
+    const std::string normalized = lowercase_ascii(topic);
+    const auto slash = normalized.find_last_of("/:");
+    const std::string_view leaf = slash == std::string::npos
+                                      ? std::string_view(normalized)
+                                      : std::string_view(normalized).substr(slash + 1);
+    return leaf == "motion" || leaf == "motionalarm" || leaf == "cellmotiondetector";
+}
+
+class OnvifStateTracker {
+  public:
+    void update(std::string key, bool active, std::chrono::steady_clock::time_point now) {
+        if (active) {
+            // Repeated true notifications confirm the same state but do not extend its hard
+            // lifetime. Only a false followed by a new true starts a fresh lease.
+            active_since_.try_emplace(std::move(key), now);
+        } else {
+            active_since_.erase(key);
+        }
+    }
+
+    std::vector<std::string> expire(std::chrono::steady_clock::time_point now,
+                                    std::chrono::seconds timeout) {
+        std::vector<std::string> expired;
+        for (auto item = active_since_.begin(); item != active_since_.end();) {
+            if (now - item->second >= timeout) {
+                expired.push_back(item->first);
+                item = active_since_.erase(item);
+            } else {
+                ++item;
+            }
+        }
+        return expired;
+    }
+
+    bool active() const noexcept {
+        return !active_since_.empty();
+    }
+
+    void clear() noexcept {
+        active_since_.clear();
+    }
+
+  private:
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> active_since_;
+};
 
 inline bool auto_baichuan_open_failure_requires_reselection(std::string_view configured_transport,
                                                             bool selected_baichuan,

@@ -109,8 +109,13 @@ locally accepts the comma-separated topic fragments in `events_topics`. This wor
 with common topics such as `RuleEngine/CellMotionDetector/Motion` and
 `VideoSource/MotionAlarm`, plus Reolink smart topics such as `PeopleDetect`, `VehicleDetect`,
 `DogCatDetect`, and `FaceDetect`, while allowing other vendor topics to be added. Boolean
-`IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items drive the event state.
-Multiple rules/sources are tracked separately and combined by OR.
+`IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items are recognized. Base
+`Motion` and `MotionAlarm` topics hold the event state and multiple rules/sources are combined
+by OR. Smart analytics such as `PeopleDetect` and `VehicleDetect` are edge triggers: they can
+start an event, but a missing smart-topic `false` cannot hold it open indefinitely.
+`onvif_state_timeout` is a hard lifetime in seconds for each active base state. A repeated
+`true` does not extend it; if the camera omits `false`, the state is cleared and an ONVIF-only
+event is stopped when the timeout expires. The default is 3600 seconds.
 
 Set `events_log on` while commissioning a camera to write every received notification
 as a single structured JSON object at info level. The record includes the raw topic, whether
@@ -221,7 +226,9 @@ Existing deployments that queue event-video conversion through
 `vibe-motion-event-compression.service`. It processes one queued job per legacy
 handler invocation, immediately checks for another completed job, waits ten
 seconds after an empty check, and runs the legacy `periodic` handler once per
-minute. A completed `on_movie_end` hook wakes an idle worker through
+minute. Each queue handler and its child process group is terminated after the
+configured two-hour timeout so one stuck encoder cannot block the worker forever.
+A completed `on_movie_end` hook wakes an idle worker through
 `/run/vibe-motion-event-worker/wake`. The worker is limited to one CPU and runs
 with reduced CPU and I/O priority. Disable the legacy `motion_periodic` cron
 entry when enabling this service. `vibe-motion-media-maintenance.timer`

@@ -35,6 +35,7 @@ struct CameraConfig {
     bool events_log = false;
     std::string events_topics =
         "Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect";
+    int onvif_state_timeout = 3600;
     bool motion_detection = true;
     std::string decode_frames = "all";
 
@@ -81,7 +82,8 @@ struct CameraConfig {
     std::string snapshot_filename = "snapshot";
     int timelapse_interval = 0;
     std::string timelapse_mode = "daily";
-    std::string timelapse_filename = "%Y%m%d-timelapse";
+    // Include the opening time so a same-day restart cannot truncate an earlier daily file.
+    std::string timelapse_filename = "%Y%m%d%H%M%S-timelapse";
     int timelapse_fps = 30;
     std::string timelapse_container = "mkv";
     std::string timelapse_codec = "mpeg4";

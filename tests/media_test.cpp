@@ -220,6 +220,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         std::filesystem::path(__FILE__).parent_path() / "fixtures" / "media-hevc-fixture.mp4";
     assert(std::filesystem::exists(input));
     const bool has_hevc_encoder = video_encoder_available("hevc");
+    const bool has_hevc_ten_bit_encoder =
+        video_encoder_available("hevc", {}, nullptr, "yuv420p10le");
     const bool has_h264_encoder = video_encoder_available("h264", "libx264");
     assert(!video_encoder_available("hevc", "libx264"));
 
@@ -373,25 +375,30 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         .pixel_format = "yuv420p10le",
         .x265_params = "ref=2:rc-lookahead=5",
     };
-    if (!has_hevc_encoder) {
+    if (!has_hevc_ten_bit_encoder) {
         assert(!timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
         assert(error.find("unavailable") != std::string::npos);
-        return;
+    } else {
+        TimelapseEncodeOptions excessive_threads = options;
+        excessive_threads.threads = 17;
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 30, excessive_threads, &error));
+        assert(error.find("cannot exceed 16") != std::string::npos);
+
+        assert(timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
+        for (const auto& image : images)
+            assert(timelapse.write(image, &error));
+        assert(timelapse.close(&error));
+        const auto timelapse_stats = decoded_video_stats(timelapse_path);
+        assert(timelapse_stats.codec == "hevc");
+        assert(timelapse_stats.frames == static_cast<int>(images.size()));
+        assert(timelapse_stats.keyframes == 1);
+        assert(timelapse_stats.b_frames > 0);
+        assert(timelapse_stats.pixel_format == "yuv420p10le");
+        assert(av_cmp_q(timelapse_stats.nominal_frame_rate, AVRational{30, 1}) == 0);
+        assert(av_q2d(timelapse_stats.frame_rate) > 29.5);
+        assert(av_q2d(timelapse_stats.frame_rate) < 30.5);
+        assert(timelapse_stats.has_color);
     }
-    assert(timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
-    for (const auto& image : images)
-        assert(timelapse.write(image, &error));
-    assert(timelapse.close(&error));
-    const auto timelapse_stats = decoded_video_stats(timelapse_path);
-    assert(timelapse_stats.codec == "hevc");
-    assert(timelapse_stats.frames == static_cast<int>(images.size()));
-    assert(timelapse_stats.keyframes == 1);
-    assert(timelapse_stats.b_frames > 0);
-    assert(timelapse_stats.pixel_format == "yuv420p10le");
-    assert(av_cmp_q(timelapse_stats.nominal_frame_rate, AVRational{30, 1}) == 0);
-    assert(av_q2d(timelapse_stats.frame_rate) > 29.5);
-    assert(av_q2d(timelapse_stats.frame_rate) < 30.5);
-    assert(timelapse_stats.has_color);
 
     if (has_h264_encoder) {
         TimelapseWriter h264_timelapse;

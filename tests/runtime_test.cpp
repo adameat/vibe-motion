@@ -20,6 +20,29 @@ int main() {
     assert(!onvif_identification_failure_is_fatal(false, "rtsp://camera.test/onvif/main"));
     assert(!onvif_identification_failure_is_fatal(true, "https://camera.test/media/main"));
 
+    assert(onvif_topic_holds_motion_state("tns1:RuleEngine/CellMotionDetector/Motion"));
+    assert(onvif_topic_holds_motion_state("tns1:VideoSource/MotionAlarm"));
+    assert(onvif_topic_holds_motion_state("Motion"));
+    assert(!onvif_topic_holds_motion_state("tns1:RuleEngine/MyRuleDetector/PeopleDetect"));
+    assert(!onvif_topic_holds_motion_state("tns1:RuleEngine/MyRuleDetector/VehicleDetect"));
+
+    const auto state_start = std::chrono::steady_clock::time_point{};
+    OnvifStateTracker states;
+    states.update("motion", true, state_start);
+    states.update("motion", true, state_start + std::chrono::minutes(59));
+    assert(states.active());
+    assert(states.expire(state_start + std::chrono::minutes(59), std::chrono::hours(1)).empty());
+    const auto expired = states.expire(state_start + std::chrono::hours(1), std::chrono::hours(1));
+    assert(expired.size() == 1 && expired.front() == "motion");
+    assert(!states.active());
+
+    states.update("motion", true, state_start);
+    states.update("alarm", true, state_start + std::chrono::minutes(30));
+    assert(states.expire(state_start + std::chrono::hours(1), std::chrono::hours(1)).size() == 1);
+    assert(states.active());
+    states.update("alarm", false, state_start + std::chrono::hours(1));
+    assert(!states.active());
+
     assert(auto_baichuan_open_failure_requires_reselection("auto", true, false));
     assert(!auto_baichuan_open_failure_requires_reselection("auto", true, true));
     assert(!auto_baichuan_open_failure_requires_reselection("auto", false, false));

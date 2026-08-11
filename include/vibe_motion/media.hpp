@@ -230,7 +230,8 @@ using TimelapseEncodeOptions = VideoEncodeOptions;
 std::string normalize_video_codec(std::string codec);
 
 bool video_encoder_available(const std::string& codec, const std::string& encoder = {},
-                             std::string* selected_encoder = nullptr);
+                             std::string* selected_encoder = nullptr,
+                             const std::string& pixel_format = "yuv420p");
 
 class FragmentedMp4Writer {
   public:

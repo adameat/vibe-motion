@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=oneshot
 Environment=GRAPHITE_HOST=db
 Environment=GRAPHITE_PORT=2003
-Environment=VIBE_STATUS_URL=http://127.0.0.1:8892/status
+Environment=VIBE_STATUS_URL=http://127.0.0.1:8880/status
+EnvironmentFile=-/etc/default/vibe-motion-diagnostics
 ExecStart=/usr/local/libexec/vibe-motion-graphite-exporter
 StateDirectory=vibe-motion-diagnostics
 NoNewPrivileges=true

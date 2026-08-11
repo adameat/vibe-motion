@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 
-STATUS_URL = os.environ.get("VIBE_STATUS_URL", "http://127.0.0.1:8892/status")
+STATUS_URL = os.environ.get("VIBE_STATUS_URL", "http://127.0.0.1:8880/status")
 GRAPHITE_HOST = os.environ.get("GRAPHITE_HOST", "db")
 GRAPHITE_PORT = int(os.environ.get("GRAPHITE_PORT", "2003"))
 STATE_PATH = Path(

@@ -7,7 +7,7 @@ RequiresMountsFor=/cam
 [Service]
 Type=simple
 WorkingDirectory=/etc/motion
-ExecStart=/usr/local/libexec/vibe-motion-event-worker --sender camka --periodic-cameras 3,4,10,11,12,13,14,15 --periodic-iterations 5 --periodic-interval 60 --idle-delay 10 --wake-fifo /run/vibe-motion-event-worker/wake
+ExecStart=/usr/local/libexec/vibe-motion-event-worker --sender camka --periodic-cameras 3,4,10,11,12,13,14,15 --periodic-iterations 5 --periodic-interval 60 --idle-delay 10 --job-timeout 7200 --wake-fifo /run/vibe-motion-event-worker/wake
 Restart=always
 RestartSec=10s
 RuntimeDirectory=vibe-motion-event-worker

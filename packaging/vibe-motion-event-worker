@@ -18,7 +18,8 @@ def log(message):
 
 class JobProcess:
     def __init__(self, command):
-        self.process = subprocess.Popen(command, stdout=subprocess.PIPE)
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, start_new_session=True)
+        self.started_at = time.monotonic()
         self.processed = False
         self.thread = threading.Thread(target=self._copy_output, daemon=True)
         self.thread.start()
@@ -46,6 +47,9 @@ class JobProcess:
     def poll(self):
         return self.process.poll()
 
+    def timed_out(self, now, timeout):
+        return self.poll() is None and now - self.started_at >= timeout
+
     def finish(self):
         returncode = self.process.wait()
         self.thread.join()
@@ -53,7 +57,18 @@ class JobProcess:
 
     def terminate(self):
         if self.process.poll() is None:
-            self.process.terminate()
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait()
 
 
 def ensure_wake_fifo(path):
@@ -76,6 +91,7 @@ def parse_args():
     parser.add_argument("--periodic-iterations", type=int, default=5)
     parser.add_argument("--periodic-interval", type=float, default=60.0)
     parser.add_argument("--idle-delay", type=float, default=10.0)
+    parser.add_argument("--job-timeout", type=float, default=7200.0)
     parser.add_argument("--wake-fifo", required=True)
     parser.add_argument("--periodic-log", default="/var/log/motion/motion_periodic.log")
     return parser.parse_args()
@@ -94,8 +110,8 @@ def stop_process(process):
 
 def main():
     args = parse_args()
-    if args.periodic_interval <= 0 or args.idle_delay <= 0:
-        raise ValueError("worker intervals must be positive")
+    if args.periodic_interval <= 0 or args.idle_delay <= 0 or args.job_timeout <= 0:
+        raise ValueError("worker intervals and job timeout must be positive")
 
     stopping = False
 
@@ -125,11 +141,19 @@ def main():
 
     log(
         f"started; empty job delay={args.idle_delay:g}s, "
-        f"periodic interval={args.periodic_interval:g}s"
+        f"periodic interval={args.periodic_interval:g}s, job timeout={args.job_timeout:g}s"
     )
     try:
         while not stopping:
             now = time.monotonic()
+
+            if job is not None and job.timed_out(now, args.job_timeout):
+                log(f"job exceeded {args.job_timeout:g}s; terminating its process group")
+                job.terminate()
+                _returncode, processed = job.finish()
+                job = None
+                now = time.monotonic()
+                next_job_at = now if processed else now + args.idle_delay
 
             if job is not None and job.poll() is not None:
                 returncode, processed = job.finish()

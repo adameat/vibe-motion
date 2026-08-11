@@ -404,6 +404,25 @@ std::string camera_url_host(const std::string& url) {
 
 enum class SelectedMediaTransport { direct, onvif, baichuan };
 
+struct MediaTransportLifetimeState {
+    std::atomic<bool> baichuan_established{false};
+};
+
+struct CameraMediaLifetime {
+    CameraConfig config;
+    std::shared_ptr<MediaTransportLifetimeState> state;
+};
+
+bool same_media_source(const CameraConfig& left, const CameraConfig& right) {
+    return left.camera_url == right.camera_url && left.camera_userpass == right.camera_userpass &&
+           left.camera_auth == right.camera_auth &&
+           left.camera_tls_verify == right.camera_tls_verify &&
+           left.media_transport == right.media_transport && left.media_port == right.media_port &&
+           left.media_channel == right.media_channel && left.media_stream == right.media_stream &&
+           left.media_profile == right.media_profile && left.media_options == right.media_options &&
+           left.media_use_tcp == right.media_use_tcp;
+}
+
 const char* selected_transport_name(SelectedMediaTransport transport) {
     switch (transport) {
     case SelectedMediaTransport::direct:
@@ -419,9 +438,9 @@ const char* selected_transport_name(SelectedMediaTransport transport) {
 class CameraWorker {
   public:
     CameraWorker(CameraConfig config, std::filesystem::path target_dir, HookExecutor& hooks,
-                 HttpServer* http)
+                 HttpServer* http, std::shared_ptr<MediaTransportLifetimeState> media_state)
         : config_(std::move(config)), target_dir_(std::move(target_dir)), hooks_(hooks),
-          http_(http) {
+          http_(http), media_state_(std::move(media_state)) {
         status_.effective_threshold = static_cast<std::uint64_t>(std::max(config_.threshold, 0));
         status_.effective_noise_level =
             static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
@@ -595,7 +614,10 @@ class CameraWorker {
                 bool active = false;
                 {
                     std::lock_guard<std::mutex> lock(onvif_state_mutex_);
-                    onvif_states_[event.key] = event.active;
+                    if (runtime_detail::onvif_topic_holds_motion_state(event.topic)) {
+                        onvif_states_.update(event.key, event.active,
+                                             std::chrono::steady_clock::now());
+                    }
                     if (event.active) {
                         if (const auto event_time = parse_onvif_utc_time(event.utc_time);
                             event_time && (!onvif_pending_trigger_time_ ||
@@ -605,8 +627,7 @@ class CameraWorker {
                         // Publish the generation only after its timestamp is visible.
                         onvif_trigger_generation_.fetch_add(1);
                     }
-                    active = std::any_of(onvif_states_.begin(), onvif_states_.end(),
-                                         [](const auto& item) { return item.second; });
+                    active = onvif_states_.active();
                 }
                 onvif_motion_.store(active);
                 set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
@@ -630,6 +651,33 @@ class CameraWorker {
                                              ": ONVIF events: ", redact_secrets(error));
                 }
             });
+    }
+
+    void expire_onvif_states() {
+        std::vector<std::string> expired;
+        bool active = false;
+        bool became_inactive = false;
+        {
+            std::lock_guard<std::mutex> lock(onvif_state_mutex_);
+            const bool was_active = onvif_states_.active();
+            expired = onvif_states_.expire(std::chrono::steady_clock::now(),
+                                           std::chrono::seconds(config_.onvif_state_timeout));
+            active = onvif_states_.active();
+            became_inactive = was_active && !active;
+        }
+        if (expired.empty()) {
+            return;
+        }
+        onvif_motion_.store(active);
+        set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+        for (const auto& key : expired) {
+            Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
+                                     ": ONVIF state timed out after ", config_.onvif_state_timeout,
+                                     "s: ", key);
+        }
+        if (became_inactive) {
+            onvif_timeout_generation_.fetch_add(1);
+        }
     }
 
     ExpansionContext context(const DetectionResult& detection, const GrayFrame& frame,
@@ -804,7 +852,8 @@ class CameraWorker {
         };
 
         EventStateMachine events({config_.minimum_motion_frames,
-                                  std::chrono::seconds(config_.event_gap), config_.post_capture});
+                                  std::chrono::seconds(config_.event_gap), config_.post_capture,
+                                  std::chrono::seconds(config_.movie_max_time)});
         const double pre_seconds =
             static_cast<double>(config_.pre_capture + config_.minimum_motion_frames) /
             std::max(1, config_.framerate);
@@ -825,6 +874,7 @@ class CameraWorker {
         std::chrono::steady_clock::time_point last_http_publish{};
         bool record_live = false;
         std::uint64_t seen_onvif_trigger = 0;
+        std::uint64_t seen_onvif_timeout = 0;
         int onvif_trigger_frames = 0;
         std::optional<std::chrono::system_clock::time_point> pending_onvif_event_time;
         std::optional<OnvifStream> onvif_stream;
@@ -835,7 +885,6 @@ class CameraWorker {
         }
         std::optional<SelectedMediaTransport> selected_transport;
         bool auto_skip_baichuan = false;
-        bool baichuan_established = false;
         if (config_.media_transport == "direct") {
             selected_transport = SelectedMediaTransport::direct;
         } else if (config_.media_transport == "onvif") {
@@ -989,7 +1038,8 @@ class CameraWorker {
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": connect failed: ", redact_secrets(open_error));
                 if (runtime_detail::auto_baichuan_open_failure_requires_reselection(
-                        config_.media_transport, use_baichuan, baichuan_established)) {
+                        config_.media_transport, use_baichuan,
+                        media_state_->baichuan_established.load())) {
                     auto_skip_baichuan = true;
                     selected_transport.reset();
                 }
@@ -998,7 +1048,9 @@ class CameraWorker {
                 }
                 continue;
             }
-            baichuan_established = baichuan_established || use_baichuan;
+            if (use_baichuan) {
+                media_state_->baichuan_established.store(true);
+            }
             FrameDecodeController decode_controller(configured_idle_decode_mode);
             auto reported_requested_mode = decode_controller.requested_mode();
             auto reported_active_mode = decode_controller.active_mode();
@@ -1095,6 +1147,10 @@ class CameraWorker {
                 if (sample.packet.valid()) {
                     ++input_packets;
                     input_bytes += sample.packet.size();
+                    set_status([&](WorkerStatus& state) {
+                        state.input_packets = input_packets;
+                        state.input_bytes = input_bytes;
+                    });
                 }
                 ring.push(sample.packet);
                 if (publish_video_packets && sample.packet.valid()) {
@@ -1125,6 +1181,7 @@ class CameraWorker {
                     last_keyframe_at = now;
                 }
                 update_decode_mode(sample.packet.keyframe() || sample.decoded_keyframe);
+                expire_onvif_states();
                 if (!sample.frame) {
                     if (movie.is_open() && record_live) {
                         std::string error;
@@ -1153,6 +1210,9 @@ class CameraWorker {
                         static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
                 }
                 const bool warmed = std::chrono::steady_clock::now() >= warm_until;
+                const std::uint64_t onvif_timeout_generation = onvif_timeout_generation_.load();
+                const bool onvif_timed_out = onvif_timeout_generation != seen_onvif_timeout;
+                seen_onvif_timeout = onvif_timeout_generation;
                 const std::uint64_t onvif_generation = onvif_trigger_generation_.load();
                 bool onvif_edge = false;
                 if (onvif_generation != seen_onvif_trigger) {
@@ -1170,12 +1230,15 @@ class CameraWorker {
                     }
                 }
                 const bool onvif_triggered = onvif_motion_.load() || onvif_trigger_frames > 0;
-                const bool qualifying_motion =
-                    (config_.motion_detection && warmed && detection.motion) ||
-                    (config_.events && onvif_triggered);
-                const auto decision =
-                    events.update(qualifying_motion, std::chrono::steady_clock::now(),
-                                  config_.events && onvif_edge);
+                const bool local_motion = config_.motion_detection && warmed && detection.motion;
+                const bool qualifying_motion = local_motion || (config_.events && onvif_triggered);
+                EventDecision decision;
+                if (onvif_timed_out && events.active() && !local_motion && !onvif_triggered) {
+                    decision = events.stop();
+                } else {
+                    decision = events.update(qualifying_motion, std::chrono::steady_clock::now(),
+                                             config_.events && onvif_edge);
+                }
                 if (onvif_trigger_frames > 0) {
                     --onvif_trigger_frames;
                 }
@@ -1194,8 +1257,6 @@ class CameraWorker {
                 record_live = record_frame;
                 set_status([&](WorkerStatus& state) {
                     state.frames++;
-                    state.input_packets = input_packets;
-                    state.input_bytes = input_bytes;
                     state.changed_pixels = detection.changed_pixels;
                     state.effective_threshold = detection.effective_threshold;
                     state.effective_noise_level = detection.effective_noise_level;
@@ -1434,13 +1495,15 @@ class CameraWorker {
     std::filesystem::path target_dir_;
     HookExecutor& hooks_;
     HttpServer* http_ = nullptr;
+    std::shared_ptr<MediaTransportLifetimeState> media_state_;
     std::atomic<bool> stopping_{false};
     std::thread thread_;
     std::thread onvif_thread_;
     std::atomic<bool> onvif_motion_{false};
     std::atomic<std::uint64_t> onvif_trigger_generation_{0};
+    std::atomic<std::uint64_t> onvif_timeout_generation_{0};
     std::mutex onvif_state_mutex_;
-    std::unordered_map<std::string, bool> onvif_states_;
+    runtime_detail::OnvifStateTracker onvif_states_;
     std::optional<std::chrono::system_clock::time_point> onvif_pending_trigger_time_;
     mutable std::mutex status_mutex_;
     WorkerStatus status_;
@@ -1590,6 +1653,19 @@ class Application::Impl {
     }
 
     void apply(Config replacement) {
+        std::unordered_map<int, CameraMediaLifetime> replacement_media_lifetimes;
+        for (const auto& camera : replacement.cameras) {
+            std::shared_ptr<MediaTransportLifetimeState> state;
+            if (const auto existing = media_lifetimes_.find(camera.camera_id);
+                existing != media_lifetimes_.end() &&
+                same_media_source(existing->second.config, camera)) {
+                state = existing->second.state;
+            } else {
+                state = std::make_shared<MediaTransportLifetimeState>();
+            }
+            replacement_media_lifetimes.emplace(camera.camera_id,
+                                                CameraMediaLifetime{camera, std::move(state)});
+        }
         shutdown_workers();
         if (http_) {
             http_->stop();
@@ -1603,9 +1679,11 @@ class Application::Impl {
             http_ = std::make_unique<HttpServer>(options, [this] { return status_json(); });
             http_->start();
         }
+        media_lifetimes_ = std::move(replacement_media_lifetimes);
         for (const auto& camera : config_.cameras) {
+            const auto media_state = media_lifetimes_.at(camera.camera_id).state;
             auto worker = std::make_unique<CameraWorker>(camera, config_.global.target_dir, hooks_,
-                                                         http_.get());
+                                                         http_.get(), media_state);
             worker->start();
             {
                 std::lock_guard<std::mutex> workers_lock(workers_mutex_);
@@ -1621,6 +1699,7 @@ class Application::Impl {
     std::unique_ptr<HttpServer> http_;
     mutable std::mutex workers_mutex_;
     std::vector<std::unique_ptr<CameraWorker>> workers_;
+    std::unordered_map<int, CameraMediaLifetime> media_lifetimes_;
     std::atomic<bool> stopping_{false};
     std::atomic<bool> reloading_{false};
 };

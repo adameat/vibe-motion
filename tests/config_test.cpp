@@ -83,6 +83,7 @@ int main() {
     assert(deployment.global.camera_defaults.movie_bitrate == 750000);
     assert(deployment.global.camera_defaults.movie_keyframe_interval == 5);
     assert(deployment.global.camera_defaults.timelapse_codec == "mpeg4");
+    assert(CameraConfig{}.timelapse_filename == "%Y%m%d%H%M%S-timelapse");
     assert(deployment.global.camera_defaults.stream_codec == "copy");
     assert(deployment.global.camera_defaults.stream_quality == 65);
     assert(deployment.global.camera_defaults.stream_bitrate == 500000);
@@ -97,6 +98,12 @@ int main() {
     assert(deployment.cameras.front().timelapse_x265_params == "ref=4:rc-lookahead=60");
     assert(deployment.cameras.front().locate_motion_mode == "preview");
     assert(deployment.cameras.front().locate_motion_style == "redbox");
+
+    Config capped_movies = deployment;
+    for (auto& camera : capped_movies.cameras) {
+        camera.movie_max_time = 600;
+    }
+    capped_movies.validate();
 
     Config padded_container = deployment;
     for (auto& camera : padded_container.cameras) {
@@ -129,6 +136,7 @@ int main() {
     assert(onvif.cameras.front().media_transport == "auto");
     assert(onvif.cameras.front().events);
     assert(onvif.cameras.front().events_log);
+    assert(onvif.cameras.front().onvif_state_timeout == 3600);
     assert(!onvif.cameras.front().camera_tls_verify);
     assert(!onvif.cameras.front().motion_detection);
     assert(onvif.cameras.front().decode_frames == "auto");
@@ -300,6 +308,18 @@ int main() {
         invalid.cameras.front().timelapse_threads = 65;
         invalid.validate();
     });
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            auto& camera = invalid.cameras.at(1);
+            camera.timelapse_codec = "hevc";
+            camera.timelapse_encoder = "libx265";
+            camera.timelapse_container = "mkv";
+            camera.timelapse_pixel_format = "yuv420p";
+            camera.timelapse_threads = 17;
+            invalid.validate();
+        },
+        "libx265 timelapse_threads cannot exceed 16");
     expect_config_error([&] {
         Config invalid = deployment;
         invalid.cameras.front().timelapse_b_frames = 17;

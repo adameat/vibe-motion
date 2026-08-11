@@ -7,6 +7,10 @@ graphite_port=${GRAPHITE_PORT:-2003}
 graphite_prefix=${GRAPHITE_PREFIX:-$(hostname)}
 cam_root=${CAM_ROOT:-/cam}
 
+metric_component() {
+    printf '%s' "$1" | sed 's/[^A-Za-z0-9_-]/_/g'
+}
+
 collect_directory() {
     local metric=$1
     local directory=$2
@@ -15,9 +19,12 @@ collect_directory() {
     local entry_size
     local file_count
 
-    test -d "$directory"
+    if [[ ! -d "$directory" ]]; then
+        printf '%s.%s_count 0 %s\n' "$graphite_prefix" "$metric" "$timestamp"
+        return
+    fi
     while IFS= read -r -d '' entry; do
-        entry_name=${entry##*/}
+        entry_name=$(metric_component "${entry##*/}")
         entry_size=$(du -bs -- "$entry" | awk '{print $1}')
         printf '%s.%s.%s.size %s %s\n' \
             "$graphite_prefix" "$metric" "$entry_name" "$entry_size" "$timestamp"

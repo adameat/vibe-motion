@@ -217,7 +217,14 @@ void HttpServer::publish_timelapse_video(std::string camera_id, const VideoPacke
         return;
     {
         std::lock_guard<std::mutex> lock(frames_mutex_);
-        timelapse_packets_[std::move(camera_id)] = {packet, next_version_++};
+        auto& packets = timelapse_packets_[std::move(camera_id)];
+        packets.push_back({packet, next_version_++});
+        const auto newest = packet.received_at();
+        while (!packets.empty() &&
+               (packets.size() > 4096 ||
+                newest - packets.front().packet.received_at() > std::chrono::seconds(10))) {
+            packets.pop_front();
+        }
     }
     frames_changed_.notify_all();
 }
@@ -503,7 +510,9 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
             std::unique_lock<std::mutex> lock(frames_mutex_);
             const bool packet_available =
                 frames_changed_.wait_for(lock, options_.write_timeout, [&] {
-                    return !running_.load() || timelapse_packets_.contains(camera);
+                    const auto found = timelapse_packets_.find(camera);
+                    return !running_.load() ||
+                           (found != timelapse_packets_.end() && !found->second.empty());
                 });
             if (!running_.load())
                 return;
@@ -513,7 +522,7 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                                 "No timelapse packet is available\n");
                 return;
             }
-            seed = timelapse_packets_.at(camera);
+            seed = timelapse_packets_.at(camera).back();
         }
 
         FragmentedMp4Writer writer;
@@ -566,27 +575,38 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
 
         std::uint64_t delivered = seed.version;
         bool started = false;
+        Logger::instance().write(LogLevel::info, "web stream start camera=", camera,
+                                 " format=timelapse-mp4 codec=", seed.packet.stream().codec_name());
         while (running_.load() && error.empty()) {
-            PublishedVideoPacket next;
+            std::vector<PublishedVideoPacket> pending;
             {
                 std::unique_lock<std::mutex> lock(frames_mutex_);
                 frames_changed_.wait(lock, [&] {
                     const auto found = timelapse_packets_.find(camera);
                     return !running_.load() ||
-                           (found != timelapse_packets_.end() && found->second.version > delivered);
+                           (found != timelapse_packets_.end() && !found->second.empty() &&
+                            found->second.back().version > delivered);
                 });
                 if (!running_.load())
                     break;
-                next = timelapse_packets_.at(camera);
+                for (const auto& packet : timelapse_packets_.at(camera)) {
+                    if (packet.version > delivered)
+                        pending.push_back(packet);
+                }
             }
-            delivered = next.version;
-            if (!started && !next.packet.keyframe())
-                continue;
-            if (!writer.write(next.packet, &error))
-                break;
-            started = true;
+            for (const auto& next : pending) {
+                delivered = next.version;
+                if (!started && !next.packet.keyframe())
+                    continue;
+                if (!writer.write(next.packet, &error))
+                    break;
+                started = true;
+            }
         }
         writer.close(nullptr);
+        Logger::instance().write(LogLevel::info, "web stream end camera=", camera,
+                                 " format=timelapse-mp4 reason=",
+                                 error.empty() ? "server stopped or client closed" : error);
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             const auto found = timelapse_stream_clients_.find(camera);
