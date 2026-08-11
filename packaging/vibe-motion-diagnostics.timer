@@ -2,8 +2,7 @@
 Description=Collect vibe-motion diagnostics every minute
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnCalendar=*-*-* *:*:00
 AccuracySec=1s
 Persistent=true
 
