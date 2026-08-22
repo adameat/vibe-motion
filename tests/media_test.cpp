@@ -315,7 +315,7 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     else if (video_encoder_available("h264"))
         transcode_codec = "h264";
     if (!transcode_codec.empty()) {
-        const auto preroll = ring.snapshot_from_latest_keyframe();
+        const auto preroll = ring.snapshot();
         const VideoEncodeOptions transcode_options{
             .quality = 60,
             .bitrate = 0,
@@ -493,12 +493,14 @@ int main(int, char** argv) {
     assert(source.stream_info().valid());
 
     PacketRing ring(std::chrono::seconds(10), 1000);
+    PacketRing aligned_ring(std::chrono::milliseconds(1500), 1000);
     EventMovieWriter movie;
     std::vector<DecodedImage> images;
     constexpr std::size_t timelapse_frame_limit = 5;
     bool movie_opened = false;
     bool overlay_tested = false;
     int samples = 0;
+    int buffered_packets = 0;
     for (;;) {
         auto result = source.read();
         if (result.status == CameraReadStatus::end_of_stream)
@@ -509,6 +511,11 @@ int main(int, char** argv) {
         assert(result.sample.has_value());
         auto& sample = *result.sample;
         ring.push(sample.packet);
+        if (sample.packet.valid()) {
+            aligned_ring.push(sample.packet, std::chrono::steady_clock::time_point{} +
+                                                 std::chrono::milliseconds(buffered_packets * 100));
+            ++buffered_packets;
+        }
         if (sample.frame) {
             assert(sample.frame->pixels.size() == 160U * 120U);
             assert(sample.image);
@@ -541,6 +548,10 @@ int main(int, char** argv) {
     }
     assert(samples >= 20);
     assert(overlay_tested);
+    const auto aligned_preroll = aligned_ring.snapshot();
+    assert(!aligned_preroll.empty());
+    assert(aligned_preroll.front().keyframe());
+    assert(aligned_preroll.size() >= 16);
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 

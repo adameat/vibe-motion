@@ -80,6 +80,7 @@ int main() {
     assert(deployment.global.camera_defaults.noise_tune);
     assert(deployment.global.camera_defaults.movie_all_frames);
     assert(deployment.global.camera_defaults.movie_codec == "copy");
+    assert(deployment.global.camera_defaults.movie_preroll == 2);
     assert(deployment.global.camera_defaults.movie_bitrate == 750000);
     assert(deployment.global.camera_defaults.movie_keyframe_interval == 5);
     assert(deployment.global.camera_defaults.timelapse_codec == "mpeg4");
@@ -205,14 +206,17 @@ int main() {
     assert(comments.global.unknown_options.at("future") == "value with spaces");
 
     const Config noise = ConfigParser().parse_string(
-        "noise_level 64\nnoise_tune off\nmovie_all_frames off\ncamera cameras/rtmp.conf\n",
+        "noise_level 64\nnoise_tune off\nmovie_all_frames off\nmovie_preroll 7\n"
+        "camera cameras/rtmp.conf\n",
         fixtures / "noise-main.conf");
     assert(noise.global.camera_defaults.noise_level == 64);
     assert(!noise.global.camera_defaults.noise_tune);
     assert(!noise.global.camera_defaults.movie_all_frames);
+    assert(noise.global.camera_defaults.movie_preroll == 7);
     const std::string noise_dump = noise.dump_effective();
     assert(noise_dump.find("noise_tune off") != std::string::npos);
     assert(noise_dump.find("movie_all_frames off") != std::string::npos);
+    assert(noise_dump.find("movie_preroll 7") != std::string::npos);
 
     Config daily_timelapse = deployment;
     daily_timelapse.cameras.at(1).timelapse_mode = "daily";
@@ -349,6 +353,13 @@ int main() {
         invalid.cameras.front().movie_encoder = "definitely-not-an-encoder";
         invalid.validate();
     });
+    expect_config_error_message(
+        [&] {
+            Config invalid = deployment;
+            invalid.cameras.front().movie_preroll = -1;
+            invalid.validate();
+        },
+        "movie_preroll must be between 0 and 60 seconds");
     expect_config_error([&] {
         Config invalid = deployment;
         invalid.cameras.front().stream_codec = "hevc";

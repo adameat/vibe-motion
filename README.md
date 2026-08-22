@@ -145,6 +145,13 @@ Snapshots, event pictures, and timelapse use decoded keyframes while idle, so th
 idle cadence is limited by the camera's GOP/keyframe interval. The JSON status exposes the
 configured, requested, and active decode modes plus the latest observed keyframe interval.
 
+`movie_preroll` sets the compressed event-video buffer in seconds and defaults to `2`.
+The ring holds reference-counted encoded packets without decoding them. When an event starts,
+the writer begins at the newest keyframe at or before the requested time boundary, flushes that
+aligned window into the movie, and then continues with live camera packets. The actual lead-in
+can exceed the configured duration by up to the camera's keyframe interval. This packet-time
+setting is independent of the legacy frame-counted `pre_capture` option.
+
 The JSON status reports subscription health, aggregate motion state, profile token, event
 count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
 media-discovery and event-subscription errors. `camera_auth auto`

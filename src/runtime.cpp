@@ -854,12 +854,7 @@ class CameraWorker {
         EventStateMachine events({config_.minimum_motion_frames,
                                   std::chrono::seconds(config_.event_gap), config_.post_capture,
                                   std::chrono::seconds(config_.movie_max_time)});
-        const double pre_seconds =
-            static_cast<double>(config_.pre_capture + config_.minimum_motion_frames) /
-            std::max(1, config_.framerate);
-        PacketRing ring(
-            std::chrono::milliseconds(static_cast<int>(std::max(5.0, pre_seconds + 2.0) * 1000.0)),
-            8192);
+        PacketRing ring(std::chrono::seconds(config_.movie_preroll), 8192);
         EventMovieWriter movie;
         TimelapseWriter timelapse;
         std::filesystem::path movie_path;

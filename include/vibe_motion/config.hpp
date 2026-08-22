@@ -69,6 +69,7 @@ struct CameraConfig {
     bool movie_passthrough = false;
     bool movie_all_frames = true;
     bool movie_duplicate_frames = false;
+    int movie_preroll = 2;
     int movie_max_time = 0;
     int movie_quality = 75;
     std::string movie_codec = "copy";

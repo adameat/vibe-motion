@@ -168,17 +168,23 @@ class NetworkCameraSource {
 
 class PacketRing {
   public:
-    explicit PacketRing(std::chrono::milliseconds maximum_age = std::chrono::seconds{5},
+    explicit PacketRing(std::chrono::milliseconds preroll = std::chrono::seconds{2},
                         std::size_t maximum_packets = 2048);
     void push(const VideoPacket& packet);
+    void push(const VideoPacket& packet, std::chrono::steady_clock::time_point received_at);
     void clear() noexcept;
     std::size_t size() const noexcept;
-    std::vector<VideoPacket> snapshot_from_latest_keyframe() const;
+    std::vector<VideoPacket> snapshot() const;
 
   private:
-    std::chrono::milliseconds maximum_age_;
+    struct Entry {
+        VideoPacket packet;
+        std::chrono::steady_clock::time_point received_at;
+    };
+
+    std::chrono::milliseconds preroll_;
     std::size_t maximum_packets_;
-    std::vector<VideoPacket> packets_;
+    std::vector<Entry> packets_;
 };
 
 class EventMovieWriter {

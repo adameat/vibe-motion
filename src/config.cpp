@@ -267,6 +267,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.movie_all_frames = boolean(value, location, key);
     else if (key == "movie_duplicate_frames")
         c.movie_duplicate_frames = boolean(value, location, key);
+    else if (key == "movie_preroll")
+        c.movie_preroll = integer(value, location, key);
     else if (key == "movie_max_time")
         c.movie_max_time = integer(value, location, key);
     else if (key == "movie_quality")
@@ -561,6 +563,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "movie_passthrough " << bool_text(c.movie_passthrough) << '\n'
         << "movie_all_frames " << bool_text(c.movie_all_frames) << '\n'
         << "movie_duplicate_frames " << bool_text(c.movie_duplicate_frames) << '\n'
+        << "movie_preroll " << c.movie_preroll << '\n'
         << "movie_max_time " << c.movie_max_time << '\n'
         << "movie_quality " << c.movie_quality << '\n'
         << "movie_codec " << c.movie_codec << '\n'
@@ -734,6 +737,8 @@ void Config::validate() const {
                     "movie_bitrate must be between 0 and 1000000000");
         check_range(c.movie_keyframe_interval > 0 && c.movie_keyframe_interval <= 86400, c,
                     "movie_keyframe_interval must be between 1 and 86400");
+        check_range(c.movie_preroll >= 0 && c.movie_preroll <= 60, c,
+                    "movie_preroll must be between 0 and 60 seconds");
         check_range(!c.picture_output || c.picture_output_mode == "best", c,
                     "only picture_output off/best is implemented");
         check_range(!c.movie_output ||

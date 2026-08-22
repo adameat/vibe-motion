@@ -26,6 +26,7 @@ extern "C" {
 #include <climits>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -1081,27 +1082,49 @@ std::vector<std::uint8_t> NetworkCameraSource::render_jpeg(const DecodedImage& i
     return impl_->encode_jpeg(image.impl_->frame.get(), redbox);
 }
 
-PacketRing::PacketRing(std::chrono::milliseconds maximum_age, std::size_t maximum_packets)
-    : maximum_age_(maximum_age), maximum_packets_(maximum_packets) {
-    if (maximum_age_.count() < 0 || maximum_packets_ == 0) {
+PacketRing::PacketRing(std::chrono::milliseconds preroll, std::size_t maximum_packets)
+    : preroll_(preroll), maximum_packets_(maximum_packets) {
+    if (preroll_.count() < 0 || maximum_packets_ == 0) {
         throw std::invalid_argument("invalid packet ring limits");
     }
 }
 
 void PacketRing::push(const VideoPacket& packet) {
+    push(packet, packet.received_at());
+}
+
+void PacketRing::push(const VideoPacket& packet,
+                      std::chrono::steady_clock::time_point received_at) {
     if (!packet.valid()) {
         return;
     }
-    packets_.push_back(packet);
-    const auto newest = packet.received_at();
-    auto first = packets_.begin();
-    while (
-        first != packets_.end() &&
-        (packets_.size() - static_cast<std::size_t>(first - packets_.begin()) > maximum_packets_ ||
-         newest - first->received_at() > maximum_age_)) {
-        ++first;
+    packets_.push_back({packet, received_at});
+
+    // Keep the newest keyframe at or before the requested time boundary. The
+    // resulting window is at least preroll_ old and remains independently
+    // decodable when copied into a new event file.
+    const auto cutoff = received_at - preroll_;
+    auto aligned_begin = packets_.end();
+    for (auto iterator = packets_.begin();
+         iterator != packets_.end() && iterator->received_at <= cutoff; ++iterator) {
+        if (iterator->packet.keyframe()) {
+            aligned_begin = iterator;
+        }
     }
-    packets_.erase(packets_.begin(), first);
+    if (aligned_begin == packets_.end()) {
+        aligned_begin = std::find_if(packets_.begin(), packets_.end(),
+                                     [](const Entry& entry) { return entry.packet.keyframe(); });
+    }
+    if (aligned_begin != packets_.end()) {
+        packets_.erase(packets_.begin(), aligned_begin);
+    }
+
+    if (packets_.size() > maximum_packets_) {
+        const auto hard_begin = packets_.end() - static_cast<std::ptrdiff_t>(maximum_packets_);
+        const auto keyframe = std::find_if(
+            hard_begin, packets_.end(), [](const Entry& entry) { return entry.packet.keyframe(); });
+        packets_.erase(packets_.begin(), keyframe != packets_.end() ? keyframe : hard_begin);
+    }
 }
 void PacketRing::clear() noexcept {
     packets_.clear();
@@ -1109,22 +1132,20 @@ void PacketRing::clear() noexcept {
 std::size_t PacketRing::size() const noexcept {
     return packets_.size();
 }
-std::vector<VideoPacket> PacketRing::snapshot_from_latest_keyframe() const {
+std::vector<VideoPacket> PacketRing::snapshot() const {
     if (packets_.empty()) {
         return {};
     }
-    auto begin = packets_.begin();
-    for (auto iterator = packets_.end(); iterator != packets_.begin();) {
-        --iterator;
-        if (iterator->keyframe()) {
-            begin = iterator;
-            break;
-        }
-    }
-    if (!begin->keyframe()) {
+    const auto begin = std::find_if(packets_.begin(), packets_.end(),
+                                    [](const Entry& entry) { return entry.packet.keyframe(); });
+    if (begin == packets_.end()) {
         return {};
     }
-    return {begin, packets_.end()};
+    std::vector<VideoPacket> result;
+    result.reserve(static_cast<std::size_t>(packets_.end() - begin));
+    std::transform(begin, packets_.end(), std::back_inserter(result),
+                   [](const Entry& entry) { return entry.packet; });
+    return result;
 }
 
 struct PacketTranscoder {
@@ -1573,7 +1594,7 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
     return true;
 }
 bool EventMovieWriter::write_preroll(const PacketRing& ring, std::string* error) {
-    for (const auto& packet : ring.snapshot_from_latest_keyframe()) {
+    for (const auto& packet : ring.snapshot()) {
         if (!impl_->write(packet, error)) {
             return false;
         }
