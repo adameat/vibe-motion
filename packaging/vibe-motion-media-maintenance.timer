@@ -2,7 +2,7 @@
 Description=Maintain motion media every minute
 
 [Timer]
-OnBootSec=45s
+OnActiveSec=45s
 OnUnitInactiveSec=1min
 AccuracySec=5s
 Persistent=true

@@ -1,0 +1,138 @@
+#!/bin/bash
+
+set -euo pipefail
+
+source_root=${TIMELAPSE_ARCHIVE_SOURCE:-/cam/timelapse}
+remote_host=${TIMELAPSE_ARCHIVE_HOST:-root@192.168.222.2}
+remote_root=${TIMELAPSE_ARCHIVE_DESTINATION:-/iron/archive/cam/timelapse}
+identity_file=${TIMELAPSE_ARCHIVE_IDENTITY_FILE:-/home/alexey/.ssh/root@xenohome.com}
+known_hosts_file=${TIMELAPSE_ARCHIVE_KNOWN_HOSTS:-/etc/vibe-motion/data_known_hosts}
+max_files=${TIMELAPSE_ARCHIVE_MAX_FILES:-64}
+bandwidth_kbit=${TIMELAPSE_ARCHIVE_BANDWIDTH_KBIT:-100000}
+dry_run=${TIMELAPSE_ARCHIVE_DRY_RUN:-1}
+lock_file=${TIMELAPSE_ARCHIVE_LOCK:-/run/lock/vibe-motion-timelapse-archive.lock}
+
+log() {
+    printf '%s\n' "vibe-motion-timelapse-archive: $*"
+}
+
+fail() {
+    log "error: $*" >&2
+    exit 1
+}
+
+[[ -d "$source_root" ]] || fail "source directory does not exist: $source_root"
+[[ "$remote_host" =~ ^[A-Za-z0-9@._:-]+$ ]] || fail "unsafe remote host"
+[[ "$remote_root" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "unsafe remote destination"
+[[ "$max_files" =~ ^[1-9][0-9]*$ ]] || fail "TIMELAPSE_ARCHIVE_MAX_FILES must be positive"
+[[ "$bandwidth_kbit" =~ ^[1-9][0-9]*$ ]] ||
+    fail "TIMELAPSE_ARCHIVE_BANDWIDTH_KBIT must be positive"
+[[ "$dry_run" == 0 || "$dry_run" == 1 ]] || fail "TIMELAPSE_ARCHIVE_DRY_RUN must be 0 or 1"
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+    log "another archive run is active"
+    exit 0
+fi
+
+list_file=$(mktemp)
+trap 'rm -f -- "$list_file"' EXIT
+
+today_utc=$(date -u +%Y%m%d)
+selected_files=0
+selected_bytes=0
+
+while IFS= read -r -d '' source_path; do
+    ((selected_files < max_files)) || continue
+    relative=${source_path#"$source_root"/}
+    if [[ ! "$relative" =~ ^cam[0-9]{2}/[0-9]{4}/[0-9]{2}/cam[0-9]{2}-([0-9]{8})[0-9]{6}\.mkv$ ]]; then
+        log "skip unexpected path: $source_path"
+        continue
+    fi
+    file_day=${BASH_REMATCH[1]}
+    [[ "$file_day" < "$today_utc" ]] || continue
+
+    printf '%s\0' "$source_path" >> "$list_file"
+    selected_bytes=$((selected_bytes + $(stat -c %s -- "$source_path")))
+    selected_files=$((selected_files + 1))
+done < <(find "$source_root" -mindepth 4 -maxdepth 4 -type f -name 'cam??-*.mkv' -print0 |
+    sort -z)
+
+log "selected files=$selected_files bytes=$selected_bytes dry_run=$dry_run"
+((selected_files > 0)) || exit 0
+
+if ((dry_run)); then
+    while IFS= read -r -d '' source_path; do
+        relative=${source_path#"$source_root"/}
+        log "would archive $relative"
+    done < "$list_file"
+    exit 0
+fi
+
+[[ -r "$identity_file" ]] || fail "identity file is not readable: $identity_file"
+[[ -r "$known_hosts_file" ]] || fail "known-hosts file is not readable: $known_hosts_file"
+
+ssh_options=(
+    -i "$identity_file"
+    -o BatchMode=yes
+    -o ConnectTimeout=15
+    -o StrictHostKeyChecking=yes
+    -o "UserKnownHostsFile=$known_hosts_file"
+)
+scp_options=("${ssh_options[@]}" -p -l "$bandwidth_kbit")
+
+remote_run() {
+    ssh "${ssh_options[@]}" "$remote_host" "$1"
+}
+
+remote_run "test -d '$remote_root'" || fail "remote destination does not exist: $remote_root"
+
+archived_files=0
+archived_bytes=0
+while IFS= read -r -d '' source_path; do
+    relative=${source_path#"$source_root"/}
+    remote_path="$remote_root/$relative"
+    remote_dir=${remote_path%/*}
+    remote_partial="${remote_path}.partial"
+
+    local_size=$(stat -c %s -- "$source_path")
+    local_hash=$(sha256sum -- "$source_path" | awk '{print $1}')
+    remote_run "mkdir -p '$remote_dir'"
+
+    if remote_run "test -f '$remote_path'"; then
+        remote_size=$(remote_run "stat -f %z '$remote_path'")
+        remote_hash=$(remote_run "sha256 -q '$remote_path'")
+        [[ "$remote_size" == "$local_size" && "$remote_hash" == "$local_hash" ]] ||
+            fail "destination collision: $relative"
+        current_size=$(stat -c %s -- "$source_path")
+        current_hash=$(sha256sum -- "$source_path" | awk '{print $1}')
+        [[ "$current_size" == "$local_size" && "$current_hash" == "$local_hash" ]] ||
+            fail "source changed while checking existing destination: $relative"
+    else
+        scp "${scp_options[@]}" -- "$source_path" "$remote_host:$remote_partial"
+        remote_size=$(remote_run "stat -f %z '$remote_partial'")
+        remote_hash=$(remote_run "sha256 -q '$remote_partial'")
+        [[ "$remote_size" == "$local_size" && "$remote_hash" == "$local_hash" ]] ||
+            fail "temporary copy verification failed: $relative"
+
+        current_size=$(stat -c %s -- "$source_path")
+        current_hash=$(sha256sum -- "$source_path" | awk '{print $1}')
+        if [[ "$current_size" != "$local_size" || "$current_hash" != "$local_hash" ]]; then
+            remote_run "rm -f '$remote_partial'"
+            fail "source changed during copy: $relative"
+        fi
+
+        remote_run "if test -e '$remote_path'; then exit 1; else mv '$remote_partial' '$remote_path'; fi"
+        remote_size=$(remote_run "stat -f %z '$remote_path'")
+        remote_hash=$(remote_run "sha256 -q '$remote_path'")
+        [[ "$remote_size" == "$local_size" && "$remote_hash" == "$local_hash" ]] ||
+            fail "final copy verification failed: $relative"
+    fi
+
+    rm -- "$source_path"
+    archived_files=$((archived_files + 1))
+    archived_bytes=$((archived_bytes + local_size))
+    log "archived $relative bytes=$local_size"
+done < "$list_file"
+
+log "complete files=$archived_files bytes=$archived_bytes"

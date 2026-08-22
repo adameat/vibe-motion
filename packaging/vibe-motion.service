@@ -8,6 +8,7 @@ Type=simple
 User=motion
 Group=motion
 UMask=0002
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=/usr/local/bin/vibe-motion -n -c /etc/motion/motion.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

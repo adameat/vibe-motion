@@ -240,6 +240,13 @@ per-camera timelapse, event, archive, and external-media sizes and file counts.
 Set `GRAPHITE_PREFIX` in the service to preserve an existing metric namespace
 when moving collection to another host.
 
+`vibe-motion-timelapse-archive.timer` moves timelapses whose filename date is
+older than the current UTC day to a remote archive. The worker copies each file
+to a temporary remote name, verifies its size and SHA-256, atomically publishes
+it, and only then removes the source. It is packaged in dry-run mode: pin the
+archive host key, inspect the selected paths, and explicitly set
+`TIMELAPSE_ARCHIVE_DRY_RUN=0` before enabling destructive operation.
+
 ## Compatibility notes
 
 - Main options are inherited when each `camera` directive is encountered.
