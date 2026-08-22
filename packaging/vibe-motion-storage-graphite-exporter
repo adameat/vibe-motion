@@ -1,0 +1,68 @@
+#!/bin/bash
+
+set -euo pipefail
+
+graphite_host=${GRAPHITE_HOST:-db}
+graphite_port=${GRAPHITE_PORT:-2003}
+graphite_prefix=${GRAPHITE_PREFIX:-$(hostname)}
+cam_root=${CAM_ROOT:-/cam}
+
+metric_component() {
+    printf '%s' "$1" | sed 's/[^A-Za-z0-9_-]/_/g'
+}
+
+collect_directory() {
+    local metric=$1
+    local directory=$2
+    local entry
+    local entry_name
+    local entry_size
+    local file_count
+
+    if [[ ! -d "$directory" ]]; then
+        printf '%s.%s_count 0 %s\n' "$graphite_prefix" "$metric" "$timestamp"
+        return
+    fi
+    while IFS= read -r -d '' entry; do
+        entry_name=$(metric_component "${entry##*/}")
+        entry_size=$(du -bs -- "$entry" | awk '{print $1}')
+        printf '%s.%s.%s.size %s %s\n' \
+            "$graphite_prefix" "$metric" "$entry_name" "$entry_size" "$timestamp"
+    done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+
+    file_count=$(find "$directory" -type f -printf . | wc -c)
+    printf '%s.%s_count %s %s\n' \
+        "$graphite_prefix" "$metric" "$file_count" "$timestamp"
+}
+
+collect_metrics() {
+    local fs_size
+    local fs_used
+    local fs_avail
+
+    read -r fs_size fs_used fs_avail \
+        < <(df -B1 --output=size,used,avail "$cam_root" | tail -n 1)
+    printf '%s.storage.cam.size %s %s\n' "$graphite_prefix" "$fs_size" "$timestamp"
+    printf '%s.storage.cam.used %s %s\n' "$graphite_prefix" "$fs_used" "$timestamp"
+    printf '%s.storage.cam.avail %s %s\n' "$graphite_prefix" "$fs_avail" "$timestamp"
+
+    collect_directory timelapse "$cam_root/timelapse"
+    collect_directory events "$cam_root/events"
+    collect_directory archive "$cam_root/archive/timelapse"
+    collect_directory ext "$cam_root/ext"
+}
+
+timestamp=$(date +%s)
+
+case ${1:-} in
+    --stdout)
+        collect_metrics
+        ;;
+    '')
+        collect_metrics | nc -N "$graphite_host" "$graphite_port"
+        ;;
+    *)
+        echo "usage: $0 [--stdout]" >&2
+        exit 2
+        ;;
+esac

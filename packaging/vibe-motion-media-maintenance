@@ -1,0 +1,62 @@
+#!/bin/bash
+
+set -eu
+
+cam_root=${CAM_ROOT:-/cam}
+
+find_if_present() {
+    local directory=$1
+    shift
+    if [[ -d "$directory" ]]; then
+        find "$directory" "$@"
+    fi
+}
+
+find_if_present "$cam_root/timelapse" -mindepth 1 -mtime +1 -empty -type f -delete
+find_if_present "$cam_root/timelapse" -mindepth 1 -empty -type d -delete
+find_if_present "$cam_root/events" -mindepth 1 -mtime +1 -empty -type f -delete
+find_if_present "$cam_root/events" -mindepth 1 -empty -type d -delete
+find_if_present "$cam_root/events" -mindepth 1 -mtime +15 -type f -delete
+find_if_present "$cam_root/snapshot" -mindepth 1 -type f -mmin +2 -delete
+find_if_present "$cam_root" -mindepth 1 -name 'cam??-*.lock' -ctime +1 -delete
+find_if_present "$cam_root/archive" -mindepth 1 -mtime +1 -empty -type d -delete
+find_if_present "$cam_root/archive" -mindepth 1 -mtime +1 -empty -type f -delete
+find_if_present "$cam_root/ext" -mindepth 1 -mtime +2 -type f -delete
+find_if_present "$cam_root/ext" -mindepth 1 -empty -type d -delete
+
+if [[ -d "$cam_root/snapshot" ]]; then
+    while IFS= read -r -d '' snapshot_dir; do
+        camera_name=$(basename "$snapshot_dir")
+
+        # The snapshot hook updates lastsnap files concurrently with this
+        # cleanup.  Do not use an empty directory as the offline signal: a
+        # fresh numbered snapshot may appear while find is deleting an old
+        # lastsnap path.  Repair the small lastsnap from the newest recent
+        # numbered snapshot when that race occurs.
+        latest_small=$(
+            find "$snapshot_dir" -mindepth 1 -maxdepth 1 -type f \
+                -name 'snap*s.jpg' -mmin -2 -printf '%T@ %p\n' |
+                sort -nr |
+                sed -n '1s/^[^ ]* //p'
+        )
+        if [[ -n "$latest_small" ]]; then
+            if [[ ! -e "${snapshot_dir}/lastsnaps.jpg" ]]; then
+                ln -Pf -- "$latest_small" "${snapshot_dir}/lastsnaps.jpg"
+            fi
+            continue
+        fi
+
+        placeholder="${snapshot_dir}/.lastsnaps-placeholder-$$.jpg"
+        ffmpeg \
+            -nostdin \
+            -hide_banner \
+            -loglevel error \
+            -f lavfi \
+            -i 'color=black:s=480x360:d=1' \
+            -vf "geq=lum='random(0)*255',format=gray,drawtext=text='${camera_name}':x=(w-text_w)/2:y=(h-text_h)/2:fontsize=40:fontcolor=white" \
+            -frames:v 1 \
+            -y \
+            "$placeholder"
+        mv -f -- "$placeholder" "${snapshot_dir}/lastsnaps.jpg"
+    done < <(find "$cam_root/snapshot" -mindepth 1 -type d -print0)
+fi

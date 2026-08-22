@@ -168,17 +168,23 @@ class NetworkCameraSource {
 
 class PacketRing {
   public:
-    explicit PacketRing(std::chrono::milliseconds maximum_age = std::chrono::seconds{5},
+    explicit PacketRing(std::chrono::milliseconds preroll = std::chrono::seconds{2},
                         std::size_t maximum_packets = 2048);
     void push(const VideoPacket& packet);
+    void push(const VideoPacket& packet, std::chrono::steady_clock::time_point received_at);
     void clear() noexcept;
     std::size_t size() const noexcept;
-    std::vector<VideoPacket> snapshot_from_latest_keyframe() const;
+    std::vector<VideoPacket> snapshot() const;
 
   private:
-    std::chrono::milliseconds maximum_age_;
+    struct Entry {
+        VideoPacket packet;
+        std::chrono::steady_clock::time_point received_at;
+    };
+
+    std::chrono::milliseconds preroll_;
     std::size_t maximum_packets_;
-    std::vector<VideoPacket> packets_;
+    std::vector<Entry> packets_;
 };
 
 class EventMovieWriter {
@@ -213,6 +219,12 @@ struct VideoEncodeOptions {
     std::string encoder;
     // Maximum distance between keyframes, measured in output-video seconds.
     int keyframe_interval = 10;
+    // Optional encoder preset plus explicit resource/compression controls.
+    std::string preset;
+    int threads = 0;
+    int b_frames = 0;
+    std::string pixel_format = "yuv420p";
+    std::string x265_params;
     // Web streaming favors bounded latency over encoder efficiency.
     bool low_latency = false;
     // Emit a separate fragmented-MP4 fragment for every encoded packet.
@@ -224,7 +236,8 @@ using TimelapseEncodeOptions = VideoEncodeOptions;
 std::string normalize_video_codec(std::string codec);
 
 bool video_encoder_available(const std::string& codec, const std::string& encoder = {},
-                             std::string* selected_encoder = nullptr);
+                             std::string* selected_encoder = nullptr,
+                             const std::string& pixel_format = "yuv420p");
 
 class FragmentedMp4Writer {
   public:
@@ -259,7 +272,7 @@ class TimelapseWriter {
     TimelapseWriter(TimelapseWriter&&) noexcept;
     TimelapseWriter& operator=(TimelapseWriter&&) noexcept;
 
-    // The caller chooses the path and therefore controls hourly rotation.
+    // The caller chooses the path and therefore controls period rotation.
     bool open(const std::string& path, int width, int height, int fps,
               std::string* error = nullptr);
     bool open(const std::string& path, int width, int height, int fps,

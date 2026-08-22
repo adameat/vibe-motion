@@ -6,6 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <algorithm>
@@ -93,31 +94,50 @@ static void test_packet_timestamp_normalization() {
 struct DecodedVideoStats {
     int frames = 0;
     int keyframes = 0;
+    int b_frames = 0;
     int discard_packets = 0;
     bool has_color = false;
     std::string codec;
     std::string codec_tag;
+    std::string pixel_format;
+    AVRational frame_rate{0, 1};
+    AVRational nominal_frame_rate{0, 1};
 };
 
 static bool frame_has_color(const AVFrame* frame) {
     assert(frame != nullptr);
     const auto pixel_format = static_cast<AVPixelFormat>(frame->format);
-    assert(pixel_format == AV_PIX_FMT_YUV420P || pixel_format == AV_PIX_FMT_YUVJ420P);
+    const bool eight_bit =
+        pixel_format == AV_PIX_FMT_YUV420P || pixel_format == AV_PIX_FMT_YUVJ420P;
+    const bool ten_bit = pixel_format == AV_PIX_FMT_YUV420P10LE;
+    assert(eight_bit || ten_bit);
     assert(frame->data[1] != nullptr && frame->data[2] != nullptr);
 
     const int chroma_width = (frame->width + 1) / 2;
     const int chroma_height = (frame->height + 1) / 2;
     for (int plane = 1; plane <= 2; ++plane) {
         for (int row = 0; row < chroma_height; ++row) {
-            const auto* pixels =
+            const auto* bytes =
                 frame->data[plane] + static_cast<std::ptrdiff_t>(row) * frame->linesize[plane];
-            if (std::any_of(pixels, pixels + chroma_width, [](std::uint8_t value) {
-                    constexpr int neutral = 128;
-                    constexpr int tolerance = 8;
-                    const int chroma = value;
-                    return chroma < neutral - tolerance || chroma > neutral + tolerance;
-                })) {
-                return true;
+            if (eight_bit) {
+                if (std::any_of(bytes, bytes + chroma_width, [](std::uint8_t value) {
+                        constexpr int neutral = 128;
+                        constexpr int tolerance = 8;
+                        const int chroma = value;
+                        return chroma < neutral - tolerance || chroma > neutral + tolerance;
+                    })) {
+                    return true;
+                }
+            } else {
+                const auto* pixels = reinterpret_cast<const std::uint16_t*>(bytes);
+                if (std::any_of(pixels, pixels + chroma_width, [](std::uint16_t value) {
+                        constexpr int neutral = 512;
+                        constexpr int tolerance = 32;
+                        const int chroma = value;
+                        return chroma < neutral - tolerance || chroma > neutral + tolerance;
+                    })) {
+                    return true;
+                }
             }
         }
     }
@@ -132,6 +152,12 @@ static void receive_frames(AVCodecContext* decoder, AVFrame* frame, DecodedVideo
         }
         assert(result >= 0);
         ++stats.frames;
+        stats.b_frames += frame->pict_type == AV_PICTURE_TYPE_B ? 1 : 0;
+        if (stats.pixel_format.empty()) {
+            const char* pixel_format =
+                av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
+            stats.pixel_format = pixel_format != nullptr ? pixel_format : "unknown";
+        }
         stats.has_color = stats.has_color || frame_has_color(frame);
         av_frame_unref(frame);
     }
@@ -163,6 +189,8 @@ static DecodedVideoStats decoded_video_stats(const std::filesystem::path& path) 
     assert(packet != nullptr && frame != nullptr);
     DecodedVideoStats stats;
     stats.codec = avcodec_get_name(stream->codecpar->codec_id);
+    stats.frame_rate = av_guess_frame_rate(format, stream, nullptr);
+    stats.nominal_frame_rate = stream->r_frame_rate;
     if (stream->codecpar->codec_tag != 0) {
         for (unsigned int shift = 0; shift < 32; shift += 8)
             stats.codec_tag.push_back(
@@ -192,6 +220,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         std::filesystem::path(__FILE__).parent_path() / "fixtures" / "media-hevc-fixture.mp4";
     assert(std::filesystem::exists(input));
     const bool has_hevc_encoder = video_encoder_available("hevc");
+    const bool has_hevc_ten_bit_encoder =
+        video_encoder_available("hevc", {}, nullptr, "yuv420p10le");
     const bool has_h264_encoder = video_encoder_available("h264", "libx264");
     assert(!video_encoder_available("hevc", "libx264"));
 
@@ -285,13 +315,18 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     else if (video_encoder_available("h264"))
         transcode_codec = "h264";
     if (!transcode_codec.empty()) {
-        const auto preroll = ring.snapshot_from_latest_keyframe();
+        const auto preroll = ring.snapshot();
         const VideoEncodeOptions transcode_options{
             .quality = 60,
             .bitrate = 0,
             .codec = transcode_codec,
             .encoder = {},
             .keyframe_interval = 1,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         EventMovieWriter transcoded_event;
         assert(transcoded_event.open(transcoded_event_path.string(), preroll.front().stream(),
@@ -333,21 +368,37 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
         .bitrate = 0,
         .codec = "hevc",
         .encoder = {},
-        .keyframe_interval = 2,
+        .keyframe_interval = 60,
+        .preset = "ultrafast",
+        .threads = 1,
+        .b_frames = 2,
+        .pixel_format = "yuv420p10le",
+        .x265_params = "ref=2:rc-lookahead=5",
     };
-    if (!has_hevc_encoder) {
-        assert(!timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+    if (!has_hevc_ten_bit_encoder) {
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
         assert(error.find("unavailable") != std::string::npos);
-        return;
+    } else {
+        TimelapseEncodeOptions excessive_threads = options;
+        excessive_threads.threads = 17;
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 30, excessive_threads, &error));
+        assert(error.find("cannot exceed 16") != std::string::npos);
+
+        assert(timelapse.open(timelapse_path.string(), 160, 120, 30, options, &error));
+        for (const auto& image : images)
+            assert(timelapse.write(image, &error));
+        assert(timelapse.close(&error));
+        const auto timelapse_stats = decoded_video_stats(timelapse_path);
+        assert(timelapse_stats.codec == "hevc");
+        assert(timelapse_stats.frames == static_cast<int>(images.size()));
+        assert(timelapse_stats.keyframes == 1);
+        assert(timelapse_stats.b_frames > 0);
+        assert(timelapse_stats.pixel_format == "yuv420p10le");
+        assert(av_cmp_q(timelapse_stats.nominal_frame_rate, AVRational{30, 1}) == 0);
+        assert(av_q2d(timelapse_stats.frame_rate) > 29.5);
+        assert(av_q2d(timelapse_stats.frame_rate) < 30.5);
+        assert(timelapse_stats.has_color);
     }
-    assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
-    for (const auto& image : images)
-        assert(timelapse.write(image, &error));
-    assert(timelapse.close(&error));
-    const auto timelapse_stats = decoded_video_stats(timelapse_path);
-    assert(timelapse_stats.codec == "hevc");
-    assert(timelapse_stats.frames == static_cast<int>(images.size()));
-    assert(timelapse_stats.has_color);
 
     if (has_h264_encoder) {
         TimelapseWriter h264_timelapse;
@@ -360,6 +411,11 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
             .codec = "h264",
             .encoder = "libx264",
             .keyframe_interval = 2,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         assert(
             h264_timelapse.open(h264_timelapse_path.string(), 160, 120, 1, h264_options, &error));
@@ -437,12 +493,14 @@ int main(int, char** argv) {
     assert(source.stream_info().valid());
 
     PacketRing ring(std::chrono::seconds(10), 1000);
+    PacketRing aligned_ring(std::chrono::milliseconds(1500), 1000);
     EventMovieWriter movie;
     std::vector<DecodedImage> images;
     constexpr std::size_t timelapse_frame_limit = 5;
     bool movie_opened = false;
     bool overlay_tested = false;
     int samples = 0;
+    int buffered_packets = 0;
     for (;;) {
         auto result = source.read();
         if (result.status == CameraReadStatus::end_of_stream)
@@ -453,6 +511,11 @@ int main(int, char** argv) {
         assert(result.sample.has_value());
         auto& sample = *result.sample;
         ring.push(sample.packet);
+        if (sample.packet.valid()) {
+            aligned_ring.push(sample.packet, std::chrono::steady_clock::time_point{} +
+                                                 std::chrono::milliseconds(buffered_packets * 100));
+            ++buffered_packets;
+        }
         if (sample.frame) {
             assert(sample.frame->pixels.size() == 160U * 120U);
             assert(sample.image);
@@ -485,6 +548,10 @@ int main(int, char** argv) {
     }
     assert(samples >= 20);
     assert(overlay_tested);
+    const auto aligned_preroll = aligned_ring.snapshot();
+    assert(!aligned_preroll.empty());
+    assert(aligned_preroll.front().keyframe());
+    assert(aligned_preroll.size() >= 16);
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 
@@ -500,6 +567,11 @@ int main(int, char** argv) {
             .codec = "mpeg4",
             .encoder = {},
             .keyframe_interval = 2,
+            .preset = {},
+            .threads = 0,
+            .b_frames = 0,
+            .pixel_format = "yuv420p",
+            .x265_params = {},
         };
         assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {

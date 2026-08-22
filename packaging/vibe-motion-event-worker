@@ -1,0 +1,228 @@
+#!/usr/bin/python3
+"""Run legacy motion jobs promptly and keep its periodic maintenance scheduled."""
+
+import argparse
+import os
+import select
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+
+
+def log(message):
+    print(f"event-worker: {message}", flush=True)
+
+
+class JobProcess:
+    def __init__(self, command):
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, start_new_session=True)
+        self.started_at = time.monotonic()
+        self.processed = False
+        self.thread = threading.Thread(target=self._copy_output, daemon=True)
+        self.thread.start()
+
+    def _check_line(self, line):
+        line = line.strip()
+        if line.startswith(b"event ") and b" status " in line:
+            self.processed = True
+
+    def _copy_output(self):
+        pending = b""
+        while True:
+            chunk = self.process.stdout.read(4096)
+            if not chunk:
+                break
+            os.write(sys.stdout.fileno(), chunk)
+            pending += chunk
+            lines = pending.split(b"\n")
+            pending = lines.pop()
+            for line in lines:
+                self._check_line(line)
+        if pending:
+            self._check_line(pending)
+
+    def poll(self):
+        return self.process.poll()
+
+    def timed_out(self, now, timeout):
+        return self.poll() is None and now - self.started_at >= timeout
+
+    def finish(self):
+        returncode = self.process.wait()
+        self.thread.join()
+        return returncode, self.processed
+
+    def terminate(self):
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait()
+
+
+def ensure_wake_fifo(path):
+    try:
+        os.mkfifo(path, 0o660)
+    except FileExistsError:
+        if not stat.S_ISFIFO(os.stat(path).st_mode):
+            raise RuntimeError(f"wake path exists but is not a FIFO: {path}")
+    read_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    keepalive_fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    return read_fd, keepalive_fd
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--python", default="/usr/bin/python3")
+    parser.add_argument("--motion-script", default="/etc/motion/motion.py")
+    parser.add_argument("--sender", default="camka")
+    parser.add_argument("--periodic-cameras", required=True)
+    parser.add_argument("--periodic-iterations", type=int, default=5)
+    parser.add_argument("--periodic-interval", type=float, default=60.0)
+    parser.add_argument("--idle-delay", type=float, default=10.0)
+    parser.add_argument("--job-timeout", type=float, default=7200.0)
+    parser.add_argument("--wake-fifo", required=True)
+    parser.add_argument("--periodic-log", default="/var/log/motion/motion_periodic.log")
+    return parser.parse_args()
+
+
+def stop_process(process):
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def main():
+    args = parse_args()
+    if args.periodic_interval <= 0 or args.idle_delay <= 0 or args.job_timeout <= 0:
+        raise ValueError("worker intervals and job timeout must be positive")
+
+    stopping = False
+
+    def request_stop(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    wake_fd, keepalive_fd = ensure_wake_fifo(args.wake_fifo)
+    periodic_log = open(args.periodic_log, "ab", buffering=0)
+    job = None
+    periodic = None
+    now = time.monotonic()
+    next_job_at = now
+    next_periodic_at = now
+
+    job_command = [args.python, args.motion_script, "jobs", args.sender]
+    periodic_command = [
+        args.python,
+        args.motion_script,
+        "periodic",
+        args.periodic_cameras,
+        str(args.periodic_iterations),
+    ]
+
+    log(
+        f"started; empty job delay={args.idle_delay:g}s, "
+        f"periodic interval={args.periodic_interval:g}s, job timeout={args.job_timeout:g}s"
+    )
+    try:
+        while not stopping:
+            now = time.monotonic()
+
+            if job is not None and job.timed_out(now, args.job_timeout):
+                log(f"job exceeded {args.job_timeout:g}s; terminating its process group")
+                job.terminate()
+                _returncode, processed = job.finish()
+                job = None
+                now = time.monotonic()
+                next_job_at = now if processed else now + args.idle_delay
+
+            if job is not None and job.poll() is not None:
+                returncode, processed = job.finish()
+                job = None
+                now = time.monotonic()
+                if returncode != 0:
+                    log(f"job check failed with status {returncode}; retrying in {args.idle_delay:g}s")
+                    next_job_at = now + args.idle_delay
+                elif processed:
+                    log("job completed; checking the next job immediately")
+                    next_job_at = now
+                else:
+                    log(f"job check empty; waiting up to {args.idle_delay:g}s")
+                    next_job_at = now + args.idle_delay
+
+            if periodic is not None and periodic.poll() is not None:
+                returncode = periodic.wait()
+                periodic = None
+                now = time.monotonic()
+                if returncode != 0:
+                    log(f"motion_periodic failed with status {returncode}")
+                next_job_at = min(next_job_at, now)
+
+            now = time.monotonic()
+            if periodic is None and now >= next_periodic_at:
+                log("starting motion_periodic")
+                periodic = subprocess.Popen(
+                    periodic_command, stdout=periodic_log, stderr=subprocess.STDOUT
+                )
+                next_periodic_at = now + args.periodic_interval
+
+            if job is None and now >= next_job_at:
+                log("checking one queued job")
+                job = JobProcess(job_command)
+
+            deadlines = []
+            if job is None:
+                deadlines.append(next_job_at)
+            if periodic is None:
+                deadlines.append(next_periodic_at)
+            timeout = (
+                max(0.0, min(deadlines) - time.monotonic())
+                if deadlines
+                else args.idle_delay
+            )
+            if job is not None or periodic is not None:
+                timeout = min(timeout, 0.25)
+            timeout = min(timeout, args.idle_delay)
+
+            readable, _, _ = select.select([wake_fd], [], [], timeout)
+            if readable:
+                while True:
+                    try:
+                        if not os.read(wake_fd, 4096):
+                            break
+                    except BlockingIOError:
+                        break
+                next_job_at = min(next_job_at, time.monotonic())
+                log("wake-up received from vibe-motion")
+    finally:
+        if job is not None:
+            job.terminate()
+            job.finish()
+        stop_process(periodic)
+        os.close(keepalive_fd)
+        os.close(wake_fd)
+        periodic_log.close()
+        log("stopped")
+
+
+if __name__ == "__main__":
+    main()

@@ -3,7 +3,7 @@
 `vibe-motion` is a clean-room C++20 network-camera motion daemon built with the
 LLVM toolchain (Clang 22, libc++, libc++abi, and LLD). Its first
 compatibility target covers RTMP/RTSP input, motion masks and event grouping,
-snapshots, best event pictures, passthrough event movies, hourly timelapse,
+snapshots, best event pictures, passthrough event movies, hourly or daily timelapse,
 hooks, and an integrated MJPEG/status HTTP server.
 
 It deliberately does **not** support local V4L2/libcamera devices or databases.
@@ -109,8 +109,13 @@ locally accepts the comma-separated topic fragments in `events_topics`. This wor
 with common topics such as `RuleEngine/CellMotionDetector/Motion` and
 `VideoSource/MotionAlarm`, plus Reolink smart topics such as `PeopleDetect`, `VehicleDetect`,
 `DogCatDetect`, and `FaceDetect`, while allowing other vendor topics to be added. Boolean
-`IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items drive the event state.
-Multiple rules/sources are tracked separately and combined by OR.
+`IsMotion`, `Motion`, `State`, `Alarm`, or `LogicalState` data items are recognized. Base
+`Motion` and `MotionAlarm` topics hold the event state and multiple rules/sources are combined
+by OR. Smart analytics such as `PeopleDetect` and `VehicleDetect` are edge triggers: they can
+start an event, but a missing smart-topic `false` cannot hold it open indefinitely.
+`onvif_state_timeout` is a hard lifetime in seconds for each active base state. A repeated
+`true` does not extend it; if the camera omits `false`, the state is cleared and an ONVIF-only
+event is stopped when the timeout expires. The default is 3600 seconds.
 
 Set `events_log on` while commissioning a camera to write every received notification
 as a single structured JSON object at info level. The record includes the raw topic, whether
@@ -139,6 +144,13 @@ Every compressed packet still enters the pre-capture ring and an active passthro
 Snapshots, event pictures, and timelapse use decoded keyframes while idle, so their maximum
 idle cadence is limited by the camera's GOP/keyframe interval. The JSON status exposes the
 configured, requested, and active decode modes plus the latest observed keyframe interval.
+
+`movie_preroll` sets the compressed event-video buffer in seconds and defaults to `2`.
+The ring holds reference-counted encoded packets without decoding them. When an event starts,
+the writer begins at the newest keyframe at or before the requested time boundary, flushes that
+aligned window into the movie, and then continues with live camera packets. The actual lead-in
+can exceed the configured duration by up to the camera's keyframe interval. This packet-time
+setting is independent of the legacy frame-counted `pre_capture` option.
 
 The JSON status reports subscription health, aggregate motion state, profile token, event
 count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
@@ -210,6 +222,38 @@ with integrations that inspect parent process names. They are started with
 timeout without restarting camera workers. The daemon executable and systemd
 service remain visibly named `vibe-motion`.
 
+For production diagnosis, `packaging/vibe-motion-graphite-exporter.py` can be
+installed with its companion systemd service and timer. It exports process and
+named-thread CPU, per-camera input/output byte counters, successful timelapse
+frames, and timelapse write latency without changing camera, movie, event, or
+encoder settings.
+
+Existing deployments that queue event-video conversion through
+`/etc/motion/motion.py` can run that queue locally with
+`vibe-motion-event-compression.service`. It processes one queued job per legacy
+handler invocation, immediately checks for another completed job, waits ten
+seconds after an empty check, and runs the legacy `periodic` handler once per
+minute. Each queue handler and its child process group is terminated after the
+configured two-hour timeout so one stuck encoder cannot block the worker forever.
+A completed `on_movie_end` hook wakes an idle worker through
+`/run/vibe-motion-event-worker/wake`. The worker is limited to one CPU and runs
+with reduced CPU and I/O priority. Disable the legacy `motion_periodic` cron
+entry when enabling this service. `vibe-motion-media-maintenance.timer`
+replaces the legacy media-retention portion of `archive.sh`; review its paths
+and retention periods before enabling it on a new host.
+
+`vibe-motion-storage-graphite.timer` exports aggregate `/cam` space plus
+per-camera timelapse, event, archive, and external-media sizes and file counts.
+Set `GRAPHITE_PREFIX` in the service to preserve an existing metric namespace
+when moving collection to another host.
+
+`vibe-motion-timelapse-archive.timer` moves timelapses whose filename date is
+older than the current UTC day to a remote archive. The worker copies each file
+to a temporary remote name, verifies its size and SHA-256, atomically publishes
+it, and only then removes the source. It is packaged in dry-run mode: pin the
+archive host key, inspect the selected paths, and explicitly set
+`TIMELAPSE_ARCHIVE_DRY_RUN=0` before enabling destructive operation.
+
 ## Compatibility notes
 
 - Main options are inherited when each `camera` directive is encountered.
@@ -221,6 +265,10 @@ service remain visibly named `vibe-motion`.
 - Pending periodic snapshot hooks are coalesced per camera. Event lifecycle and
   movie completion hooks have priority and may evict a superseded snapshot when
   the bounded queue is full.
+- Periodic snapshots use a stable camera-id phase on the system clock within
+  `snapshot_interval`. Startup and reconnect arm the next phase instead of
+  writing an immediate catch-up snapshot, so camera timestamp jumps cannot make
+  the writers converge again.
 - MP4/MKV passthrough begins from the latest buffered keyframe and rebases
   packet timestamps. `movie_codec copy` preserves the camera codec. A fixed
   `movie_codec h264|hevc` decodes and re-encodes the same packet stream;
@@ -228,9 +276,16 @@ service remain visibly named `vibe-motion`.
   and `movie_keyframe_interval` control that encoder. HEVC in MP4 is tagged
   as `hvc1`. Validate passthrough for every camera codec before production
   cutover.
-- `timelapse_container mkv` is recommended for hourly timelapse output. The
+- `timelapse_mode hourly|daily` rotates output on the corresponding local-time
+  boundary. With a filename template containing seconds, a process restart
+  starts a new timestamped fragment instead of resuming the existing container.
+- `timelapse_container mkv` is recommended for timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.
+- `timelapse_interval` controls wall-clock sampling cadence, while
+  `timelapse_fps` controls only the playback rate of the output file. For
+  example, an interval of one second and an output rate of 30 fps produce
+  approximately 30x playback without encoding 30 source frames per second.
 - `timelapse_codec mpeg4|h264|hevc` selects the encoded codec independently of
   the container. `timelapse_encoder libx264|libx265` requests a software
   encoder explicitly; an empty encoder prefers the matching x264/x265
@@ -241,6 +296,16 @@ service remain visibly named `vibe-motion`.
   resolution-derived default and a positive value selects an explicit number
   of bits per second. `timelapse_keyframe_interval` sets the maximum distance
   between keyframes in output-video seconds; its default is 10.
+- `timelapse_preset` selects an x264/x265 speed preset.
+  `timelapse_threads` limits encoder threads (`0` keeps the encoder default),
+  and `timelapse_b_frames` enables bidirectionally predicted frames. For
+  low-CPU archival HEVC, a single thread, an `ultrafast` preset, B-frames, and
+  a long keyframe interval trade live-stream latency for much smaller files.
+- `timelapse_pixel_format yuv420p|yuv420p10le` selects 8-bit Main or 10-bit
+  Main10 HEVC input precision. `timelapse_x265_params` appends advanced,
+  colon-separated libx265 parameters. Both settings are inherited normally,
+  so a camera file can override the archival profile without affecting the
+  other timelapse encoders.
 - `stream_codec mjpeg` keeps only the Motion-compatible MJPEG routes.
   `stream_codec copy` enables packet-based fragmented-MP4 passthrough at
   `/<camera>/video.mp4`. A fixed `stream_codec h264|hevc` creates one

@@ -37,6 +37,9 @@ static std::string get(std::uint16_t port, const std::string& path) {
     address.sin_port = htons(port);
     assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const timeval receive_timeout{5, 0};
+    assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) ==
+           0);
     const std::string request =
         "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     send_all(fd, request);
@@ -77,8 +80,18 @@ static std::string get_headers(std::uint16_t port, const std::string& path) {
     return response;
 }
 
-static std::string get_until(std::uint16_t port, const std::string& path,
-                             const std::string& marker) {
+static std::size_t occurrences(const std::string& value, const std::string& marker) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while ((offset = value.find(marker, offset)) != std::string::npos) {
+        ++count;
+        offset += marker.size();
+    }
+    return count;
+}
+
+static std::string get_until(std::uint16_t port, const std::string& path, const std::string& marker,
+                             std::size_t marker_count = 1) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
     sockaddr_in address{};
@@ -86,15 +99,22 @@ static std::string get_until(std::uint16_t port, const std::string& path,
     address.sin_port = htons(port);
     assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const timeval receive_timeout{5, 0};
+    assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) ==
+           0);
     const std::string request =
         "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     send_all(fd, request);
     std::string response;
     char buffer[4096];
-    while (response.find(marker) == std::string::npos) {
+    while (occurrences(response, marker) < marker_count) {
         const auto count = ::recv(fd, buffer, sizeof(buffer), 0);
         if (count < 0 && errno == EINTR)
             continue;
+        if (count <= 0) {
+            std::cerr << "timed out after " << occurrences(response, marker) << " occurrences of "
+                      << marker << '\n';
+        }
         assert(count > 0);
         response.append(buffer, static_cast<std::size_t>(count));
     }
@@ -172,7 +192,7 @@ int main(int, char** argv) {
         std::string timelapse_video;
         std::atomic<bool> timelapse_done{false};
         std::thread timelapse_requester([&] {
-            timelapse_video = get_until(server.port(), "/7/timelapse.mp4", "moof");
+            timelapse_video = get_until(server.port(), "/7/timelapse.mp4", "moof", 4);
             timelapse_done.store(true);
         });
         for (int attempt = 0; attempt < 100 && !server.has_timelapse_stream_clients("7");
@@ -184,15 +204,16 @@ int main(int, char** argv) {
             server.publish_timelapse_video("7", *packet);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         assert(!timelapse_done.load());
-        server.publish_timelapse_video("7", *next_keyframe);
-        const auto after_keyframe = std::next(next_keyframe);
-        assert(after_keyframe != packets.end());
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        server.publish_timelapse_video("7", *after_keyframe);
+        auto burst_packet = next_keyframe;
+        for (int count = 0; count < 5; ++count) {
+            assert(burst_packet != packets.end());
+            server.publish_timelapse_video("7", *burst_packet);
+            ++burst_packet;
+        }
         timelapse_requester.join();
         assert(timelapse_video.find("200 OK") != std::string::npos);
         assert(timelapse_video.find("Content-Type: video/mp4") != std::string::npos);
-        assert(timelapse_video.find("moof") != std::string::npos);
+        assert(occurrences(timelapse_video, "moof") >= 4);
     }
     server.stop();
 

@@ -189,6 +189,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.events_log = boolean(value, location, key);
     else if (key == "events_topics")
         c.events_topics = value;
+    else if (key == "onvif_state_timeout")
+        c.onvif_state_timeout = integer(value, location, key);
     else if (key == "motion_detection")
         c.motion_detection = boolean(value, location, key);
     else if (key == "decode_frames")
@@ -265,6 +267,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.movie_all_frames = boolean(value, location, key);
     else if (key == "movie_duplicate_frames")
         c.movie_duplicate_frames = boolean(value, location, key);
+    else if (key == "movie_preroll")
+        c.movie_preroll = integer(value, location, key);
     else if (key == "movie_max_time")
         c.movie_max_time = integer(value, location, key);
     else if (key == "movie_quality")
@@ -305,6 +309,16 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.timelapse_bitrate = integer(value, location, key);
     else if (key == "timelapse_keyframe_interval")
         c.timelapse_keyframe_interval = integer(value, location, key);
+    else if (key == "timelapse_preset")
+        c.timelapse_preset = lower(trim(value));
+    else if (key == "timelapse_threads")
+        c.timelapse_threads = integer(value, location, key);
+    else if (key == "timelapse_b_frames")
+        c.timelapse_b_frames = integer(value, location, key);
+    else if (key == "timelapse_pixel_format")
+        c.timelapse_pixel_format = lower(trim(value));
+    else if (key == "timelapse_x265_params")
+        c.timelapse_x265_params = trim(value);
     else if (key == "locate_motion_mode")
         c.locate_motion_mode = lower(trim(value));
     else if (key == "locate_motion_style")
@@ -518,6 +532,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "events " << bool_text(c.events) << '\n'
         << "events_log " << bool_text(c.events_log) << '\n'
         << "events_topics " << c.events_topics << '\n'
+        << "onvif_state_timeout " << c.onvif_state_timeout << '\n'
         << "motion_detection " << bool_text(c.motion_detection) << '\n'
         << "decode_frames " << c.decode_frames << '\n'
         << "width "
@@ -548,6 +563,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "movie_passthrough " << bool_text(c.movie_passthrough) << '\n'
         << "movie_all_frames " << bool_text(c.movie_all_frames) << '\n'
         << "movie_duplicate_frames " << bool_text(c.movie_duplicate_frames) << '\n'
+        << "movie_preroll " << c.movie_preroll << '\n'
         << "movie_max_time " << c.movie_max_time << '\n'
         << "movie_quality " << c.movie_quality << '\n'
         << "movie_codec " << c.movie_codec << '\n'
@@ -568,6 +584,11 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "timelapse_quality " << c.timelapse_quality << '\n'
         << "timelapse_bitrate " << c.timelapse_bitrate << '\n'
         << "timelapse_keyframe_interval " << c.timelapse_keyframe_interval << '\n'
+        << "timelapse_preset " << c.timelapse_preset << '\n'
+        << "timelapse_threads " << c.timelapse_threads << '\n'
+        << "timelapse_b_frames " << c.timelapse_b_frames << '\n'
+        << "timelapse_pixel_format " << c.timelapse_pixel_format << '\n'
+        << "timelapse_x265_params " << c.timelapse_x265_params << '\n'
         << "locate_motion_mode " << c.locate_motion_mode << '\n'
         << "locate_motion_style " << c.locate_motion_style << '\n'
         << "on_event_start " << c.on_event_start << '\n'
@@ -686,6 +707,8 @@ void Config::validate() const {
         check_range(!c.events_log || c.events, c, "events_log requires events");
         check_range(!c.events || !trim(c.events_topics).empty(), c,
                     "events_topics cannot be empty when events are enabled");
+        check_range(c.onvif_state_timeout > 0 && c.onvif_state_timeout <= 86400, c,
+                    "onvif_state_timeout must be between 1 and 86400");
         check_range(c.camera_auth == "auto" || c.camera_auth == "digest" || c.camera_auth == "wsse",
                     c, "camera_auth must be auto, digest, or wsse");
         check_range(c.decode_frames == "all" || c.decode_frames == "keyframes" ||
@@ -714,6 +737,8 @@ void Config::validate() const {
                     "movie_bitrate must be between 0 and 1000000000");
         check_range(c.movie_keyframe_interval > 0 && c.movie_keyframe_interval <= 86400, c,
                     "movie_keyframe_interval must be between 1 and 86400");
+        check_range(c.movie_preroll >= 0 && c.movie_preroll <= 60, c,
+                    "movie_preroll must be between 0 and 60 seconds");
         check_range(!c.picture_output || c.picture_output_mode == "best", c,
                     "only picture_output off/best is implemented");
         check_range(!c.movie_output ||
@@ -723,7 +748,6 @@ void Config::validate() const {
         check_range(!c.movie_output || c.movie_codec == "copy" || c.movie_codec == "passthrough" ||
                         video_encoder_available(c.movie_codec, c.movie_encoder),
                     c, "requested movie encoder is unavailable or has the wrong codec");
-        check_range(c.movie_max_time == 0, c, "movie_max_time rollover is not implemented; use 0");
         check_range(c.movie_container == "mp4" || c.movie_container == "mkv", c,
                     "movie_container must be mp4 or mkv");
         check_range(c.movie_max_time >= 0 && c.snapshot_interval >= 0 && c.timelapse_interval >= 0,
@@ -736,8 +760,23 @@ void Config::validate() const {
                     "timelapse_bitrate must be between 0 and 1000000000");
         check_range(c.timelapse_keyframe_interval > 0 && c.timelapse_keyframe_interval <= 86400, c,
                     "timelapse_keyframe_interval must be between 1 and 86400");
-        check_range(c.timelapse_interval == 0 || lower(c.timelapse_mode) == "hourly", c,
-                    "only hourly timelapse_mode is implemented");
+        static const std::set<std::string> encoder_presets{
+            "",       "ultrafast", "superfast", "veryfast", "faster",  "fast",
+            "medium", "slow",      "slower",    "veryslow", "placebo",
+        };
+        check_range(encoder_presets.contains(lower(trim(c.timelapse_preset))), c,
+                    "timelapse_preset is not a supported x264/x265 preset");
+        check_range(c.timelapse_threads >= 0 && c.timelapse_threads <= 64, c,
+                    "timelapse_threads must be between 0 and 64");
+        check_range(c.timelapse_b_frames >= 0 && c.timelapse_b_frames <= 16, c,
+                    "timelapse_b_frames must be between 0 and 16");
+        check_range(c.timelapse_pixel_format == "yuv420p" ||
+                        c.timelapse_pixel_format == "yuv420p10le",
+                    c, "timelapse_pixel_format must be yuv420p or yuv420p10le");
+        const std::string timelapse_mode = lower(trim(c.timelapse_mode));
+        check_range(c.timelapse_interval == 0 || timelapse_mode == "hourly" ||
+                        timelapse_mode == "daily",
+                    c, "timelapse_mode must be hourly or daily");
         const std::string timelapse_container = lower(trim(c.timelapse_container));
         check_range(c.timelapse_interval == 0 || timelapse_container == "mkv" ||
                         timelapse_container == "mpeg4" || timelapse_container == "mp4",
@@ -746,13 +785,29 @@ void Config::validate() const {
         check_range(
             timelapse_codec == "mpeg4" || timelapse_codec == "h264" || timelapse_codec == "hevc", c,
             "timelapse_codec must be mpeg4, h264, x264, libx264, hevc, h265, x265, or libx265");
+        check_range(c.timelapse_preset.empty() || timelapse_codec == "h264" ||
+                        timelapse_codec == "hevc",
+                    c, "timelapse_preset requires H.264 or HEVC");
         check_range(timelapse_codec == "mpeg4" || timelapse_container != "mpeg4", c,
                     "H.264/HEVC timelapse requires the mkv or mp4 container");
+        const std::string requested_timelapse_encoder = lower(trim(c.timelapse_encoder));
+        check_range(c.timelapse_interval == 0 || requested_timelapse_encoder != "libx265" ||
+                        c.timelapse_threads <= 16,
+                    c, "libx265 timelapse_threads cannot exceed 16");
         std::string selected_encoder;
-        check_range(
-            c.timelapse_interval == 0 ||
-                video_encoder_available(c.timelapse_codec, c.timelapse_encoder, &selected_encoder),
-            c, "requested timelapse encoder is unavailable or has the wrong codec");
+        check_range(c.timelapse_interval == 0 ||
+                        video_encoder_available(c.timelapse_codec, c.timelapse_encoder,
+                                                &selected_encoder, c.timelapse_pixel_format),
+                    c, "requested timelapse encoder is unavailable or has the wrong codec");
+        check_range(c.timelapse_interval == 0 || selected_encoder != "libx265" ||
+                        c.timelapse_threads <= 16,
+                    c, "libx265 timelapse_threads cannot exceed 16");
+        check_range(c.timelapse_interval == 0 || c.timelapse_pixel_format == "yuv420p" ||
+                        selected_encoder == "libx265",
+                    c, "timelapse_pixel_format yuv420p10le requires libx265");
+        check_range(c.timelapse_interval == 0 || c.timelapse_x265_params.empty() ||
+                        selected_encoder == "libx265",
+                    c, "timelapse_x265_params requires libx265");
         check_range(c.stream_port >= 0 && c.stream_port <= 65535, c, "invalid stream_port");
         check_range(c.stream_maxrate > 0, c, "stream_maxrate must be positive");
         check_range(c.stream_codec == "mjpeg" || c.stream_codec == "copy" ||
