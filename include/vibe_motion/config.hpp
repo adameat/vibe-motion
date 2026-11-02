@@ -36,6 +36,8 @@ struct CameraConfig {
     std::string events_topics =
         "Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect";
     int onvif_state_timeout = 3600;
+    // Opt-in renewable lifetime for all accepted ONVIF topics. Zero keeps legacy behavior.
+    int onvif_state_ttl = 0;
     bool motion_detection = true;
     std::string decode_frames = "all";
 

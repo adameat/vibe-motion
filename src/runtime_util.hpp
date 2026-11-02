@@ -53,11 +53,15 @@ inline bool onvif_topic_holds_motion_state(std::string_view topic) {
 
 class OnvifStateTracker {
   public:
-    void update(std::string key, bool active, std::chrono::steady_clock::time_point now) {
+    void update(std::string key, bool active, std::chrono::steady_clock::time_point now,
+                bool renewable = false) {
         if (active) {
-            // Repeated true notifications confirm the same state but do not extend its hard
-            // lifetime. Only a false followed by a new true starts a fresh lease.
-            active_since_.try_emplace(std::move(key), now);
+            if (renewable) {
+                active_since_.insert_or_assign(std::move(key), now);
+            } else {
+                // Preserve the legacy hard lifetime even when true notifications repeat.
+                active_since_.try_emplace(std::move(key), now);
+            }
         } else {
             active_since_.erase(key);
         }

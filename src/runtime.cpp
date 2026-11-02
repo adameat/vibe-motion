@@ -611,12 +611,13 @@ class CameraWorker {
                 if (!event.motion_topic || !event.has_state) {
                     return;
                 }
-                bool active = false;
                 {
                     std::lock_guard<std::mutex> lock(onvif_state_mutex_);
-                    if (runtime_detail::onvif_topic_holds_motion_state(event.topic)) {
+                    if (config_.onvif_state_ttl > 0 ||
+                        runtime_detail::onvif_topic_holds_motion_state(event.topic)) {
                         onvif_states_.update(event.key, event.active,
-                                             std::chrono::steady_clock::now());
+                                             std::chrono::steady_clock::now(),
+                                             config_.onvif_state_ttl > 0);
                     }
                     if (event.active) {
                         if (const auto event_time = parse_onvif_utc_time(event.utc_time);
@@ -627,10 +628,9 @@ class CameraWorker {
                         // Publish the generation only after its timestamp is visible.
                         onvif_trigger_generation_.fetch_add(1);
                     }
-                    active = onvif_states_.active();
+                    onvif_motion_.store(onvif_states_.active());
                 }
-                onvif_motion_.store(active);
-                set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+                set_status([&](WorkerStatus& state) { state.onvif_motion = onvif_motion_.load(); });
             },
             [this](bool connected, const std::string& error) {
                 if (!connected) {
@@ -638,8 +638,8 @@ class CameraWorker {
                         std::lock_guard<std::mutex> lock(onvif_state_mutex_);
                         onvif_states_.clear();
                         onvif_pending_trigger_time_.reset();
+                        onvif_motion_.store(false);
                     }
-                    onvif_motion_.store(false);
                 }
                 set_status([&](WorkerStatus& state) {
                     state.onvif_events_connected = connected;
@@ -654,6 +654,8 @@ class CameraWorker {
     }
 
     void expire_onvif_states() {
+        const bool renewable = config_.onvif_state_ttl > 0;
+        const int timeout = renewable ? config_.onvif_state_ttl : config_.onvif_state_timeout;
         std::vector<std::string> expired;
         bool active = false;
         bool became_inactive = false;
@@ -661,21 +663,26 @@ class CameraWorker {
             std::lock_guard<std::mutex> lock(onvif_state_mutex_);
             const bool was_active = onvif_states_.active();
             expired = onvif_states_.expire(std::chrono::steady_clock::now(),
-                                           std::chrono::seconds(config_.onvif_state_timeout));
+                                           std::chrono::seconds(timeout));
             active = onvif_states_.active();
             became_inactive = was_active && !active;
+            // Publish while holding the tracker lock so a concurrent true cannot
+            // be overwritten by the result of expiring an older state.
+            onvif_motion_.store(active);
         }
         if (expired.empty()) {
             return;
         }
-        onvif_motion_.store(active);
-        set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+        set_status([&](WorkerStatus& state) { state.onvif_motion = onvif_motion_.load(); });
         for (const auto& key : expired) {
-            Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
-                                     ": ONVIF state timed out after ", config_.onvif_state_timeout,
-                                     "s: ", key);
+            Logger::instance().write(
+                renewable ? LogLevel::info : LogLevel::warning, "camera ", config_.camera_id,
+                renewable ? ": ONVIF state lease expired after " : ": ONVIF state timed out after ",
+                timeout, "s: ", key);
         }
-        if (became_inactive) {
+        // Lease expiry behaves like false: preserve the normal event_gap tail.
+        // Only the legacy hard limit forces the event to stop immediately.
+        if (became_inactive && !renewable) {
             onvif_timeout_generation_.fetch_add(1);
         }
     }

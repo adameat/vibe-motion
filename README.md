@@ -117,6 +117,19 @@ start an event, but a missing smart-topic `false` cannot hold it open indefinite
 `true` does not extend it; if the camera omits `false`, the state is cleared and an ONVIF-only
 event is stopped when the timeout expires. The default is 3600 seconds.
 
+For cameras that omit motion-end notifications, opt into `onvif_state_ttl 30` per camera
+(default `0`, disabled). In this mode **all accepted topics**, including smart detections,
+hold independent renewable states keyed by topic and Source/Key. Each received `true`
+renews its state, `false` clears only that state, and silence expires it after the TTL.
+This replaces `onvif_state_timeout` for that camera. Expiry uses the normal `event_gap`
+tail instead of immediately stopping recording: TTL 30 plus gap 30 closes a stale event
+about 60 seconds after the last `true` (subject to frame cadence). Repeated notifications
+can sustain a genuine long event; `movie_max_time` still splits its recordings.
+This adds no video decoding. A camera that sends only one `true` for a long real motion
+will also expire, so enable this only for cameras whose repeat notifications are suitable.
+See `examples/camera-tapo.conf` for the cam15 Motion/People/Pet profile. Other cameras
+keep their existing behavior unless explicitly opted in.
+
 Set `events_log on` while commissioning a camera to write every received notification
 as a single structured JSON object at info level. The record includes the raw topic, whether
 it matched a configured motion topic, whether a boolean state was found, UTC time, operation,

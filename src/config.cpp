@@ -191,6 +191,8 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.events_topics = value;
     else if (key == "onvif_state_timeout")
         c.onvif_state_timeout = integer(value, location, key);
+    else if (key == "onvif_state_ttl")
+        c.onvif_state_ttl = integer(value, location, key);
     else if (key == "motion_detection")
         c.motion_detection = boolean(value, location, key);
     else if (key == "decode_frames")
@@ -533,6 +535,7 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "events_log " << bool_text(c.events_log) << '\n'
         << "events_topics " << c.events_topics << '\n'
         << "onvif_state_timeout " << c.onvif_state_timeout << '\n'
+        << "onvif_state_ttl " << c.onvif_state_ttl << '\n'
         << "motion_detection " << bool_text(c.motion_detection) << '\n'
         << "decode_frames " << c.decode_frames << '\n'
         << "width "
@@ -709,6 +712,8 @@ void Config::validate() const {
                     "events_topics cannot be empty when events are enabled");
         check_range(c.onvif_state_timeout > 0 && c.onvif_state_timeout <= 86400, c,
                     "onvif_state_timeout must be between 1 and 86400");
+        check_range(c.onvif_state_ttl >= 0 && c.onvif_state_ttl <= 86400, c,
+                    "onvif_state_ttl must be between 0 and 86400");
         check_range(c.camera_auth == "auto" || c.camera_auth == "digest" || c.camera_auth == "wsse",
                     c, "camera_auth must be auto, digest, or wsse");
         check_range(c.decode_frames == "all" || c.decode_frames == "keyframes" ||
