@@ -1,0 +1,32 @@
+[Unit]
+Description=Move closed timelapses to verified remote archive
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/cam
+
+[Service]
+Type=oneshot
+Environment=TIMELAPSE_ARCHIVE_DRY_RUN=1
+Environment=TIMELAPSE_ARCHIVE_SOURCE=/cam/timelapse
+Environment=TIMELAPSE_ARCHIVE_HOST=root@192.168.222.2
+Environment=TIMELAPSE_ARCHIVE_DESTINATION=/iron/archive/cam/timelapse
+Environment=TIMELAPSE_ARCHIVE_IDENTITY_FILE=/home/alexey/.ssh/root@xenohome.com
+Environment=TIMELAPSE_ARCHIVE_KNOWN_HOSTS=/etc/vibe-motion/data_known_hosts
+Environment=TIMELAPSE_ARCHIVE_MAX_FILES=64
+Environment=TIMELAPSE_ARCHIVE_BANDWIDTH_KBIT=100000
+Environment=TIMELAPSE_ARCHIVE_LOCK=/run/vibe-motion-timelapse-archive/lock
+ExecStart=/usr/local/libexec/vibe-motion-timelapse-archive
+RuntimeDirectory=vibe-motion-timelapse-archive
+RuntimeDirectoryMode=0755
+Nice=15
+CPUQuota=50%
+MemoryMax=256M
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/cam/timelapse
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=6h

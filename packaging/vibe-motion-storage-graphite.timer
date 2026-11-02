@@ -1,0 +1,11 @@
+[Unit]
+Description=Export camera storage metrics every minute
+
+[Timer]
+OnActiveSec=30s
+OnUnitInactiveSec=1min
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

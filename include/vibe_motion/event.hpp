@@ -12,6 +12,7 @@ struct EventSettings {
     int minimum_motion_frames = 1;
     std::chrono::seconds event_gap{60};
     int post_capture_frames = 0;
+    std::chrono::seconds max_event_duration{0};
 };
 
 struct EventDecision {
@@ -42,6 +43,7 @@ class EventStateMachine {
     int post_capture_remaining_ = 0;
     std::uint64_t event_number_ = 0;
     std::optional<std::chrono::steady_clock::time_point> last_motion_;
+    std::optional<std::chrono::steady_clock::time_point> event_started_at_;
 };
 
 } // namespace vibe_motion

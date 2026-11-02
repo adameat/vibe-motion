@@ -1,0 +1,24 @@
+[Unit]
+Description=Export camera storage metrics to Graphite
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/cam
+
+[Service]
+Type=oneshot
+Environment=GRAPHITE_HOST=db
+Environment=GRAPHITE_PORT=2003
+Environment=GRAPHITE_PREFIX=butterfly
+ExecStart=/usr/local/libexec/vibe-motion-storage-graphite-exporter
+Nice=15
+CPUQuota=25%
+MemoryMax=64M
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/cam
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=45s

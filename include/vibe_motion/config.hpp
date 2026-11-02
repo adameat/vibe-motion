@@ -35,6 +35,7 @@ struct CameraConfig {
     bool events_log = false;
     std::string events_topics =
         "Motion,MotionAlarm,CellMotionDetector,PeopleDetect,VehicleDetect,DogCatDetect,FaceDetect";
+    int onvif_state_timeout = 3600;
     bool motion_detection = true;
     std::string decode_frames = "all";
 
@@ -68,6 +69,7 @@ struct CameraConfig {
     bool movie_passthrough = false;
     bool movie_all_frames = true;
     bool movie_duplicate_frames = false;
+    int movie_preroll = 2;
     int movie_max_time = 0;
     int movie_quality = 75;
     std::string movie_codec = "copy";
@@ -81,7 +83,8 @@ struct CameraConfig {
     std::string snapshot_filename = "snapshot";
     int timelapse_interval = 0;
     std::string timelapse_mode = "daily";
-    std::string timelapse_filename = "%Y%m%d-timelapse";
+    // Include the opening time so a same-day restart cannot truncate an earlier daily file.
+    std::string timelapse_filename = "%Y%m%d%H%M%S-timelapse";
     int timelapse_fps = 30;
     std::string timelapse_container = "mkv";
     std::string timelapse_codec = "mpeg4";
@@ -89,6 +92,11 @@ struct CameraConfig {
     int timelapse_quality = 0;
     int timelapse_bitrate = 0;
     int timelapse_keyframe_interval = 10;
+    std::string timelapse_preset;
+    int timelapse_threads = 0;
+    int timelapse_b_frames = 0;
+    std::string timelapse_pixel_format = "yuv420p";
+    std::string timelapse_x265_params;
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 

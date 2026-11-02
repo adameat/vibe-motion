@@ -1,0 +1,12 @@
+[Unit]
+Description=Remove expired motion media and maintain snapshot placeholders
+RequiresMountsFor=/cam
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/vibe-motion-media-maintenance
+Nice=15
+CPUQuota=25%
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=10min

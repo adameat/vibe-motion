@@ -15,6 +15,7 @@ extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -25,10 +26,14 @@ extern "C" {
 #include <climits>
 #include <cstring>
 #include <deque>
+#include <fcntl.h>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 
 namespace vibe_motion {
@@ -180,18 +185,22 @@ bool allocate_video_frame(AVFrame* frame, AVPixelFormat format, int width, int h
 } // namespace
 
 bool video_encoder_available(const std::string& codec, const std::string& encoder,
-                             std::string* selected_encoder) {
+                             std::string* selected_encoder, const std::string& pixel_format) {
     const AVCodec* selected = find_requested_encoder(codec, encoder);
     if (selected_encoder != nullptr) {
         *selected_encoder = selected != nullptr ? selected->name : std::string{};
     }
     if (selected == nullptr)
         return false;
+    const AVPixelFormat requested_pixel_format = av_get_pix_fmt(pixel_format.c_str());
+    if (requested_pixel_format == AV_PIX_FMT_NONE)
+        return false;
     static std::mutex cache_mutex;
     static std::map<std::string, bool> cache;
+    const std::string cache_key = std::string(selected->name) + '\n' + pixel_format;
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        if (const auto found = cache.find(selected->name); found != cache.end())
+        if (const auto found = cache.find(cache_key); found != cache.end())
             return found->second;
     }
     auto context = CodecPtr(avcodec_alloc_context3(selected));
@@ -199,7 +208,7 @@ bool video_encoder_available(const std::string& codec, const std::string& encode
         return false;
     context->width = 64;
     context->height = 64;
-    context->pix_fmt = AV_PIX_FMT_YUV420P;
+    context->pix_fmt = requested_pixel_format;
     context->time_base = AVRational{1, 1};
     context->framerate = AVRational{1, 1};
     context->gop_size = 10;
@@ -212,7 +221,7 @@ bool video_encoder_available(const std::string& codec, const std::string& encode
     const bool available = result >= 0;
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        cache[selected->name] = available;
+        cache[cache_key] = available;
     }
     return available;
 }
@@ -1076,27 +1085,54 @@ std::vector<std::uint8_t> NetworkCameraSource::render_jpeg(const DecodedImage& i
     return impl_->encode_jpeg(image.impl_->frame.get(), redbox);
 }
 
-PacketRing::PacketRing(std::chrono::milliseconds maximum_age, std::size_t maximum_packets)
-    : maximum_age_(maximum_age), maximum_packets_(maximum_packets) {
-    if (maximum_age_.count() < 0 || maximum_packets_ == 0) {
+PacketRing::PacketRing(std::chrono::milliseconds preroll, std::size_t maximum_packets)
+    : preroll_(preroll), maximum_packets_(maximum_packets) {
+    if (preroll_.count() < 0 || preroll_ > std::chrono::seconds(60)) {
         throw std::invalid_argument("invalid packet ring limits");
+    }
+    if (maximum_packets_ == 0) {
+        // Budget the entire supported 240 fps window, plus the previous GOP.
+        // The time/keyframe trim still controls normal memory use.
+        maximum_packets_ = 8192 + static_cast<std::size_t>((preroll_.count() * 240 + 999) / 1000);
     }
 }
 
 void PacketRing::push(const VideoPacket& packet) {
+    push(packet, packet.received_at());
+}
+
+void PacketRing::push(const VideoPacket& packet,
+                      std::chrono::steady_clock::time_point received_at) {
     if (!packet.valid()) {
         return;
     }
-    packets_.push_back(packet);
-    const auto newest = packet.received_at();
-    auto first = packets_.begin();
-    while (
-        first != packets_.end() &&
-        (packets_.size() - static_cast<std::size_t>(first - packets_.begin()) > maximum_packets_ ||
-         newest - first->received_at() > maximum_age_)) {
-        ++first;
+    packets_.push_back({packet, received_at});
+
+    // Keep the newest keyframe at or before the requested time boundary. The
+    // resulting window is at least preroll_ old and remains independently
+    // decodable when copied into a new event file.
+    const auto cutoff = received_at - preroll_;
+    auto aligned_begin = packets_.end();
+    for (auto iterator = packets_.begin();
+         iterator != packets_.end() && iterator->received_at <= cutoff; ++iterator) {
+        if (iterator->packet.keyframe()) {
+            aligned_begin = iterator;
+        }
     }
-    packets_.erase(packets_.begin(), first);
+    if (aligned_begin == packets_.end()) {
+        aligned_begin = std::find_if(packets_.begin(), packets_.end(),
+                                     [](const Entry& entry) { return entry.packet.keyframe(); });
+    }
+    if (aligned_begin != packets_.end()) {
+        packets_.erase(packets_.begin(), aligned_begin);
+    }
+
+    if (packets_.size() > maximum_packets_) {
+        const auto hard_begin = packets_.end() - static_cast<std::ptrdiff_t>(maximum_packets_);
+        const auto keyframe = std::find_if(
+            hard_begin, packets_.end(), [](const Entry& entry) { return entry.packet.keyframe(); });
+        packets_.erase(packets_.begin(), keyframe != packets_.end() ? keyframe : hard_begin);
+    }
 }
 void PacketRing::clear() noexcept {
     packets_.clear();
@@ -1104,22 +1140,20 @@ void PacketRing::clear() noexcept {
 std::size_t PacketRing::size() const noexcept {
     return packets_.size();
 }
-std::vector<VideoPacket> PacketRing::snapshot_from_latest_keyframe() const {
+std::vector<VideoPacket> PacketRing::snapshot() const {
     if (packets_.empty()) {
         return {};
     }
-    auto begin = packets_.begin();
-    for (auto iterator = packets_.end(); iterator != packets_.begin();) {
-        --iterator;
-        if (iterator->keyframe()) {
-            begin = iterator;
-            break;
-        }
-    }
-    if (!begin->keyframe()) {
+    const auto begin = std::find_if(packets_.begin(), packets_.end(),
+                                    [](const Entry& entry) { return entry.packet.keyframe(); });
+    if (begin == packets_.end()) {
         return {};
     }
-    return {begin, packets_.end()};
+    std::vector<VideoPacket> result;
+    result.reserve(static_cast<std::size_t>(packets_.end() - begin));
+    std::transform(begin, packets_.end(), std::back_inserter(result),
+                   [](const Entry& entry) { return entry.packet; });
+    return result;
 }
 
 struct PacketTranscoder {
@@ -1568,7 +1602,7 @@ bool EventMovieWriter::open(const std::string& path, const StreamInfo& stream,
     return true;
 }
 bool EventMovieWriter::write_preroll(const PacketRing& ring, std::string* error) {
-    for (const auto& packet : ring.snapshot_from_latest_keyframe()) {
+    for (const auto& packet : ring.snapshot()) {
         if (!impl_->write(packet, error)) {
             return false;
         }
@@ -1811,6 +1845,57 @@ struct TimelapseWriter::Impl {
     TimelapseWriter::PacketCallback packet_callback;
     std::int64_t next_pts = 0;
     bool header_written = false;
+    int output_fd = -1;
+    std::string completion_path;
+
+    static int write_output(void* opaque, const std::uint8_t* bytes, int size) {
+        const int fd = static_cast<Impl*>(opaque)->output_fd;
+        int offset = 0;
+        while (offset < size) {
+            const auto written =
+                ::write(fd, bytes + offset, static_cast<std::size_t>(size - offset));
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0)
+                return AVERROR(written < 0 ? errno : EIO);
+            offset += static_cast<int>(written);
+        }
+        return size;
+    }
+
+    static std::int64_t seek_output(void* opaque, std::int64_t offset, int whence) {
+        const int fd = static_cast<Impl*>(opaque)->output_fd;
+        if (whence == AVSEEK_SIZE) {
+            struct stat info{};
+            return ::fstat(fd, &info) == 0 ? info.st_size : AVERROR(errno);
+        }
+        const auto result = ::lseek(fd, offset, whence & ~AVSEEK_FORCE);
+        return result < 0 ? AVERROR(errno) : result;
+    }
+
+    int open_output(const std::string& path) {
+        completion_path = path + ".complete";
+        struct stat marker{};
+        if (::lstat(completion_path.c_str(), &marker) == 0)
+            return AVERROR(EEXIST);
+        if (errno != ENOENT)
+            return AVERROR(errno);
+        // O_EXCL also rejects symlinks: a restart or colliding camera template
+        // must never truncate an existing recording.
+        output_fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        if (output_fd < 0)
+            return AVERROR(errno);
+        auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
+        if (buffer == nullptr)
+            return AVERROR(ENOMEM);
+        format->pb = avio_alloc_context(buffer, 32768, 1, this, nullptr, write_output, seek_output);
+        if (format->pb == nullptr) {
+            av_free(buffer);
+            return AVERROR(ENOMEM);
+        }
+        format->flags |= AVFMT_FLAG_CUSTOM_IO;
+        return 0;
+    }
 
     ~Impl() {
         close(nullptr);
@@ -1863,6 +1948,7 @@ struct TimelapseWriter::Impl {
 
     bool close(std::string* error) noexcept {
         bool success = true;
+        const bool publish_completion = header_written && output_fd >= 0;
         if (format != nullptr) {
             if (encoder && header_written) {
                 int result = avcodec_send_frame(encoder.get(), nullptr);
@@ -1871,6 +1957,12 @@ struct TimelapseWriter::Impl {
                         success = drain(error) && success;
                     } catch (...) {
                         success = false;
+                    }
+                } else if (result != AVERROR_EOF) {
+                    success = false;
+                    try {
+                        set_error(error, "cannot flush timelapse encoder: " + ff_error(result));
+                    } catch (...) {
                     }
                 }
                 result = av_write_trailer(format);
@@ -1882,10 +1974,30 @@ struct TimelapseWriter::Impl {
                     }
                 }
             }
-            if ((format->oformat->flags & AVFMT_NOFILE) == 0 && format->pb != nullptr) {
-                avio_closep(&format->pb);
+            if (format->pb != nullptr) {
+                avio_flush(format->pb);
+                if (format->pb->error < 0) {
+                    success = false;
+                    try {
+                        set_error(error,
+                                  "cannot flush timelapse output: " + ff_error(format->pb->error));
+                    } catch (...) {
+                    }
+                }
+                av_freep(&format->pb->buffer);
+                avio_context_free(&format->pb);
             }
             avformat_free_context(format);
+        }
+        if (output_fd >= 0) {
+            if (::close(output_fd) != 0) {
+                success = false;
+                try {
+                    set_error(error, "cannot close timelapse output: " + ff_error(AVERROR(errno)));
+                } catch (...) {
+                }
+            }
+            output_fd = -1;
         }
         sws_freeContext(scaler);
         scaler = nullptr;
@@ -1896,6 +2008,36 @@ struct TimelapseWriter::Impl {
         packet_stream = {};
         next_pts = 0;
         header_written = false;
+        if (success && publish_completion) {
+            // The archive worker requires this explicit closed-file handoff.
+            // Publish only after all delayed packets, trailer and file I/O
+            // succeeded, never merely because the filename is from yesterday.
+            const int marker =
+                ::open(completion_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+            int marker_error = marker < 0 ? errno : 0;
+            if (marker >= 0) {
+                constexpr char contents[] = "vibe-motion-closed-v1\n";
+                ssize_t written;
+                do {
+                    written = ::write(marker, contents, sizeof(contents) - 1);
+                } while (written < 0 && errno == EINTR);
+                if (written != static_cast<ssize_t>(sizeof(contents) - 1))
+                    marker_error = written < 0 ? errno : EIO;
+                if (::close(marker) != 0 && marker_error == 0)
+                    marker_error = errno;
+                if (marker_error != 0)
+                    ::unlink(completion_path.c_str());
+            }
+            if (marker_error != 0) {
+                success = false;
+                try {
+                    set_error(error, "cannot publish timelapse completion: " +
+                                         ff_error(AVERROR(marker_error)));
+                } catch (...) {
+                }
+            }
+        }
+        completion_path.clear();
         return success;
     }
 };
@@ -1920,12 +2062,23 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         return false;
     }
     if (options.quality < 0 || options.quality > 100 || options.bitrate < 0 ||
-        options.keyframe_interval <= 0) {
+        options.keyframe_interval <= 0 || options.threads < 0 || options.threads > 64 ||
+        options.b_frames < 0 || options.b_frames > 16) {
         set_error(error, "invalid timelapse encoding options");
         return false;
     }
-    if (!video_encoder_available(options.codec, options.encoder)) {
+    std::string selected_encoder;
+    if (!video_encoder_available(options.codec, options.encoder, &selected_encoder,
+                                 options.pixel_format)) {
         set_error(error, "requested timelapse encoder is unavailable or cannot be opened");
+        return false;
+    }
+    if (selected_encoder == "libx265" && options.threads > 16) {
+        set_error(error, "libx265 timelapse threads cannot exceed 16");
+        return false;
+    }
+    if (!options.preset.empty() && selected_encoder != "libx264" && selected_encoder != "libx265") {
+        set_error(error, "timelapse preset requires libx264 or libx265");
         return false;
     }
     int result = avformat_alloc_output_context2(&impl_->format, nullptr, nullptr, path.c_str());
@@ -1944,29 +2097,52 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     }
     impl_->encoder->width = width;
     impl_->encoder->height = height;
-    impl_->encoder->pix_fmt = AV_PIX_FMT_YUV420P;
+    impl_->encoder->pix_fmt = av_get_pix_fmt(options.pixel_format.c_str());
+    if (impl_->encoder->pix_fmt == AV_PIX_FMT_NONE) {
+        set_error(error, "unsupported timelapse pixel format: " + options.pixel_format);
+        impl_->close(nullptr);
+        return false;
+    }
     impl_->encoder->time_base = AVRational{1, fps};
     impl_->encoder->framerate = AVRational{fps, 1};
     impl_->encoder->gop_size = std::max(fps * options.keyframe_interval, 1);
     impl_->encoder->keyint_min = impl_->encoder->gop_size;
-    impl_->encoder->max_b_frames = 0;
+    impl_->encoder->max_b_frames = options.b_frames;
+    if (options.threads > 0)
+        impl_->encoder->thread_count = options.threads;
     AVDictionary* codec_options = nullptr;
-    if (std::string(codec->name) == "libx264") {
-        // One hourly encoder remains open per camera. Bound x264's otherwise
+    if (!options.preset.empty())
+        av_dict_set(&codec_options, "preset", options.preset.c_str(), 0);
+    const std::string encoder_name = codec->name;
+    if (encoder_name == "libx264") {
+        // One timelapse encoder remains open per camera. Bound x264's otherwise
         // large 4K frame-thread/lookahead queues before the first packet.
-        impl_->encoder->thread_count = 1;
-        av_dict_set(&codec_options, "preset", "veryfast", 0);
-        av_dict_set(&codec_options, "tune", "zerolatency", 0);
-        av_dict_set(&codec_options, "x264-params",
-                    "threads=1:lookahead-threads=1:sync-lookahead=0:rc-lookahead=0:ref=1:"
-                    "bframes=0:scenecut=0",
-                    0);
+        if (options.threads == 0)
+            impl_->encoder->thread_count = 1;
+        if (options.preset.empty())
+            av_dict_set(&codec_options, "preset", "veryfast", 0);
+        if (options.b_frames == 0) {
+            av_dict_set(&codec_options, "tune", "zerolatency", 0);
+            av_dict_set(&codec_options, "x264-params",
+                        "lookahead-threads=1:sync-lookahead=0:rc-lookahead=0:ref=1:"
+                        "bframes=0:scenecut=0",
+                        0);
+        }
+    }
+    if (encoder_name == "libx265") {
+        std::string parameters = "log-level=error";
+        if (options.threads == 1)
+            parameters += ":pools=none:frame-threads=1:wpp=0";
+        else if (options.threads > 1)
+            parameters += ":pools=" + std::to_string(options.threads) +
+                          ":frame-threads=" + std::to_string(options.threads);
+        if (!options.x265_params.empty())
+            parameters += ":" + options.x265_params;
+        av_dict_set(&codec_options, "x265-params", parameters.c_str(), 0);
     }
     if (options.quality > 0 && (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC)) {
         const std::string crf = std::to_string((100 - options.quality) * 51 / 100);
         av_dict_set(&codec_options, "crf", crf.c_str(), 0);
-        if (std::string(codec->name) == "libx265")
-            av_dict_set(&codec_options, "x265-params", "log-level=error", 0);
     } else if (options.quality > 0) {
         const int quantizer = 31 - ((options.quality - 1) * 29 / 99);
         impl_->encoder->flags |= AV_CODEC_FLAG_QSCALE;
@@ -2006,13 +2182,15 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         return false;
     }
     impl_->stream->time_base = impl_->encoder->time_base;
+    impl_->stream->avg_frame_rate = impl_->encoder->framerate;
+    impl_->stream->r_frame_rate = impl_->encoder->framerate;
     if (impl_->format->oformat != nullptr &&
         (std::string(impl_->format->oformat->name).find("mp4") != std::string::npos ||
          std::string(impl_->format->oformat->name).find("mov") != std::string::npos)) {
         impl_->stream->codecpar->codec_tag = mp4_codec_tag(codec->id);
     }
     if ((impl_->format->oformat->flags & AVFMT_NOFILE) == 0) {
-        result = avio_open(&impl_->format->pb, path.c_str(), AVIO_FLAG_WRITE);
+        result = impl_->open_output(path);
     }
     if (result >= 0) {
         result = avformat_write_header(impl_->format, nullptr);

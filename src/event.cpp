@@ -7,7 +7,7 @@ namespace vibe_motion {
 
 EventStateMachine::EventStateMachine(EventSettings settings) : settings_(settings) {
     if (settings_.minimum_motion_frames < 1 || settings_.post_capture_frames < 0 ||
-        settings_.event_gap.count() < 0) {
+        settings_.event_gap.count() < 0 || settings_.max_event_duration.count() < 0) {
         throw std::invalid_argument("invalid event state settings");
     }
 }
@@ -16,6 +16,18 @@ EventDecision EventStateMachine::update(bool qualifying_motion,
                                         std::chrono::steady_clock::time_point now,
                                         bool force_confirm) {
     EventDecision decision;
+    if (active_ && event_started_at_ && settings_.max_event_duration.count() > 0 &&
+        now - *event_started_at_ >= settings_.max_event_duration) {
+        active_ = false;
+        decision.event_ended = true;
+        decision.event_number = event_number_;
+        last_motion_.reset();
+        event_started_at_.reset();
+        post_capture_remaining_ = 0;
+        consecutive_motion_ = 0;
+        return decision;
+    }
+
     if (qualifying_motion) {
         consecutive_motion_ =
             force_confirm ? settings_.minimum_motion_frames
@@ -38,6 +50,7 @@ EventDecision EventStateMachine::update(bool qualifying_motion,
         post_capture_remaining_ = settings_.post_capture_frames;
         if (!active_) {
             active_ = true;
+            event_started_at_ = now;
             ++event_number_;
             decision.event_started = true;
         }
@@ -53,6 +66,7 @@ EventDecision EventStateMachine::update(bool qualifying_motion,
         decision.event_ended = true;
         decision.record_frame = false;
         last_motion_.reset();
+        event_started_at_.reset();
         post_capture_remaining_ = 0;
     }
     decision.event_number = event_number_;
@@ -67,6 +81,7 @@ EventDecision EventStateMachine::stop() {
         decision.event_ended = true;
     }
     last_motion_.reset();
+    event_started_at_.reset();
     post_capture_remaining_ = 0;
     consecutive_motion_ = 0;
     return decision;

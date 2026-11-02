@@ -125,6 +125,25 @@ target_compile_options(vibe-motion PRIVATE ${VIBE_CLANG_WARNINGS})
 
 install(TARGETS vibe-motion RUNTIME DESTINATION bin)
 install(FILES packaging/vibe-motion.service DESTINATION lib/systemd/system)
+install(PROGRAMS packaging/vibe-motion-graphite-exporter.py
+  DESTINATION libexec RENAME vibe-motion-graphite-exporter)
+install(FILES packaging/vibe-motion-diagnostics.service
+  packaging/vibe-motion-diagnostics.timer DESTINATION lib/systemd/system)
+install(PROGRAMS packaging/vibe-motion-media-maintenance
+  DESTINATION libexec)
+install(PROGRAMS packaging/vibe-motion-event-worker
+  DESTINATION libexec)
+install(PROGRAMS packaging/vibe-motion-storage-graphite-exporter
+  DESTINATION libexec)
+install(PROGRAMS packaging/vibe-motion-timelapse-archive
+  DESTINATION libexec)
+install(FILES packaging/vibe-motion-event-compression.service
+  packaging/vibe-motion-media-maintenance.service
+  packaging/vibe-motion-media-maintenance.timer
+  packaging/vibe-motion-storage-graphite.service
+  packaging/vibe-motion-storage-graphite.timer
+  packaging/vibe-motion-timelapse-archive.service
+  packaging/vibe-motion-timelapse-archive.timer DESTINATION lib/systemd/system)
 
 file(GLOB_RECURSE VIBE_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/include/*.hpp"
@@ -162,6 +181,11 @@ if(VIBE_BUILD_TESTS)
     target_include_directories(baichuan_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   endif()
   target_include_directories(runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_include_directories(http_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME packaging COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_test.py")
+  endif()
   target_include_directories(media_test SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
   find_program(FFMPEG_EXECUTABLE ffmpeg)
   if(FFMPEG_EXECUTABLE)
