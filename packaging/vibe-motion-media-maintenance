@@ -31,32 +31,38 @@ if [[ -d "$cam_root/snapshot" ]]; then
         # The snapshot hook updates lastsnap files concurrently with this
         # cleanup.  Do not use an empty directory as the offline signal: a
         # fresh numbered snapshot may appear while find is deleting an old
-        # lastsnap path.  Repair the small lastsnap from the newest recent
+        # lastsnap path. Repair both sizes from the newest matching recent
         # numbered snapshot when that race occurs.
-        latest_small=$(
-            find "$snapshot_dir" -mindepth 1 -maxdepth 1 -type f \
-                -name 'snap*s.jpg' -mmin -2 -printf '%T@ %p\n' |
-                sort -nr |
-                sed -n '1s/^[^ ]* //p'
-        )
-        if [[ -n "$latest_small" ]]; then
-            if [[ ! -e "${snapshot_dir}/lastsnaps.jpg" ]]; then
-                ln -Pf -- "$latest_small" "${snapshot_dir}/lastsnaps.jpg"
+        for suffix in '' s; do
+            patterns=(-name 'snap*.jpg' ! -name 'snap*s.jpg')
+            if [[ "$suffix" == s ]]; then
+                patterns=(-name 'snap*s.jpg')
             fi
-            continue
-        fi
+            latest_snapshot=$(
+                find "$snapshot_dir" -mindepth 1 -maxdepth 1 -type f \
+                    "${patterns[@]}" -mmin -2 -printf '%T@ %p\n' |
+                    sort -nr |
+                    sed -n '1s/^[^ ]* //p'
+            )
+            if [[ -n "$latest_snapshot" ]]; then
+                if [[ ! -e "${snapshot_dir}/lastsnap${suffix}.jpg" ]]; then
+                    ln -Pf -- "$latest_snapshot" "${snapshot_dir}/lastsnap${suffix}.jpg"
+                fi
+                continue
+            fi
 
-        placeholder="${snapshot_dir}/.lastsnaps-placeholder-$$.jpg"
-        ffmpeg \
-            -nostdin \
-            -hide_banner \
-            -loglevel error \
-            -f lavfi \
-            -i 'color=black:s=480x360:d=1' \
-            -vf "geq=lum='random(0)*255',format=gray,drawtext=text='${camera_name}':x=(w-text_w)/2:y=(h-text_h)/2:fontsize=40:fontcolor=white" \
-            -frames:v 1 \
-            -y \
-            "$placeholder"
-        mv -f -- "$placeholder" "${snapshot_dir}/lastsnaps.jpg"
+            placeholder="${snapshot_dir}/.lastsnap${suffix}-placeholder-$$.jpg"
+            ffmpeg \
+                -nostdin \
+                -hide_banner \
+                -loglevel error \
+                -f lavfi \
+                -i 'color=black:s=480x360:d=1' \
+                -vf "geq=lum='random(0)*255',format=gray,drawtext=text='${camera_name}':x=(w-text_w)/2:y=(h-text_h)/2:fontsize=40:fontcolor=white" \
+                -frames:v 1 \
+                -y \
+                "$placeholder"
+            mv -f -- "$placeholder" "${snapshot_dir}/lastsnap${suffix}.jpg"
+        done
     done < <(find "$cam_root/snapshot" -mindepth 1 -type d -print0)
 fi

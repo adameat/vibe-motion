@@ -116,6 +116,8 @@ start an event, but a missing smart-topic `false` cannot hold it open indefinite
 `onvif_state_timeout` is a hard lifetime in seconds for each active base state. A repeated
 `true` does not extend it; if the camera omits `false`, the state is cleared and an ONVIF-only
 event is stopped when the timeout expires. The default is 3600 seconds.
+An expired topic remains suppressed until its matching `false` arrives (or the
+subscription reconnects); repeated `true` cannot restart it through the edge-trigger path.
 
 Set `events_log on` while commissioning a camera to write every received notification
 as a single structured JSON object at info level. The record includes the raw topic, whether
@@ -151,6 +153,10 @@ the writer begins at the newest keyframe at or before the requested time boundar
 aligned window into the movie, and then continues with live camera packets. The actual lead-in
 can exceed the configured duration by up to the camera's keyframe interval. This packet-time
 setting is independent of the legacy frame-counted `pre_capture` option.
+The safety cap budgets 240 packets/s for the requested duration plus 8192 packets
+for keyframe alignment. If an exceptional rate/GOP exceeds that bound, the buffer
+may be shorter; the movie writer still waits for a keyframe rather than writing
+an undecodable opening.
 
 The JSON status reports subscription health, aggregate motion state, profile token, event
 count, last topic, UTC time, the last event's ONVIF Source/Data metadata, and separate
@@ -235,6 +241,10 @@ handler invocation, immediately checks for another completed job, waits ten
 seconds after an empty check, and runs the legacy `periodic` handler once per
 minute. Each queue handler and its child process group is terminated after the
 configured two-hour timeout so one stuck encoder cannot block the worker forever.
+This deployment-specific helper is opt-in: enable it separately, provision the
+`motion` user's access to the legacy script, credentials and output/log directories,
+and review its camera list. It runs as `motion`, not root. Starting the main
+daemon alone does not start the helper or require its runtime directory.
 A completed `on_movie_end` hook wakes an idle worker through
 `/run/vibe-motion-event-worker/wake`. The worker is limited to one CPU and runs
 with reduced CPU and I/O priority. Disable the legacy `motion_periodic` cron
@@ -248,7 +258,9 @@ Set `GRAPHITE_PREFIX` in the service to preserve an existing metric namespace
 when moving collection to another host.
 
 `vibe-motion-timelapse-archive.timer` moves timelapses whose filename date is
-older than the current UTC day to a remote archive. The worker copies each file
+older than the current local day to a remote archive. If the daemon has a `TZ`
+override, give the archive unit the same `TZ`. Restart fragments (`-partN`) are
+eligible under the same date rule. The worker copies each file
 to a temporary remote name, verifies its size and SHA-256, atomically publishes
 it, and only then removes the source. It is packaged in dry-run mode: pin the
 archive host key, inspect the selected paths, and explicitly set
@@ -278,7 +290,11 @@ archive host key, inspect the selected paths, and explicitly set
   cutover.
 - `timelapse_mode hourly|daily` rotates output on the corresponding local-time
   boundary. With a filename template containing seconds, a process restart
-  starts a new timestamped fragment instead of resuming the existing container.
+  starts a new fragment instead of resuming the existing container. If the
+  configured path exists, `-partN` is appended before the extension; the writer
+  uses exclusive creation and never truncates an existing file or symlink.
+  Close/flush failures are logged and counted in `timelapse_close_errors` even
+  if opening the next period succeeds.
 - `timelapse_container mkv` is recommended for timelapse output. The
   Motion-compatible `mpeg4` value writes AVI; MPEG Program Stream is not used
   for MPEG-4 timelapses.

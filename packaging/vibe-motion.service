@@ -1,7 +1,8 @@
 [Unit]
 Description=vibe-motion network camera monitor
+# Ordering alone does not start the optional legacy worker.
 After=network-online.target vibe-motion-event-compression.service
-Wants=network-online.target vibe-motion-event-compression.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -17,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/cam /var/log/motion /run/vibe-motion-event-worker
+ReadWritePaths=/cam /var/log/motion -/run/vibe-motion-event-worker
 LimitNOFILE=65536
 
 [Install]

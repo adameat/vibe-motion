@@ -38,19 +38,21 @@ fi
 list_file=$(mktemp)
 trap 'rm -f -- "$list_file"' EXIT
 
-today_utc=$(date -u +%Y%m%d)
+# Rotation and filenames use the daemon's local timezone. Set the same TZ for
+# both services if the daemon overrides the host timezone.
+today_local=$(date +%Y%m%d)
 selected_files=0
 selected_bytes=0
 
 while IFS= read -r -d '' source_path; do
     ((selected_files < max_files)) || continue
     relative=${source_path#"$source_root"/}
-    if [[ ! "$relative" =~ ^cam[0-9]{2}/[0-9]{4}/[0-9]{2}/cam[0-9]{2}-([0-9]{8})[0-9]{6}\.mkv$ ]]; then
+    if [[ ! "$relative" =~ ^cam[0-9]{2}/[0-9]{4}/[0-9]{2}/cam[0-9]{2}-([0-9]{8})[0-9]{6}(-part[0-9]+)?\.mkv$ ]]; then
         log "skip unexpected path: $source_path"
         continue
     fi
     file_day=${BASH_REMATCH[1]}
-    [[ "$file_day" < "$today_utc" ]] || continue
+    [[ "$file_day" < "$today_local" ]] || continue
 
     printf '%s\0' "$source_path" >> "$list_file"
     selected_bytes=$((selected_bytes + $(stat -c %s -- "$source_path")))

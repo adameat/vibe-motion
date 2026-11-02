@@ -1,4 +1,5 @@
 #include "vibe_motion/http.hpp"
+#include "http_internal.hpp"
 
 #include "vibe_motion/log.hpp"
 
@@ -201,7 +202,8 @@ void HttpServer::publish_video(std::string camera_id, const VideoPacket& packet,
         std::lock_guard<std::mutex> lock(frames_mutex_);
         video_options_[camera_id] = options;
         auto& packets = video_packets_[std::move(camera_id)];
-        packets.push_back({packet, next_version_++});
+        const auto version = packets.empty() ? 1 : packets.back().version + 1;
+        packets.push_back({packet, version});
         const auto newest = packet.received_at();
         while (!packets.empty() &&
                (packets.size() > 4096 ||
@@ -218,7 +220,8 @@ void HttpServer::publish_timelapse_video(std::string camera_id, const VideoPacke
     {
         std::lock_guard<std::mutex> lock(frames_mutex_);
         auto& packets = timelapse_packets_[std::move(camera_id)];
-        packets.push_back({packet, next_version_++});
+        const auto version = packets.empty() ? 1 : packets.back().version + 1;
+        packets.push_back({packet, version});
         const auto newest = packet.received_at();
         while (!packets.empty() &&
                (packets.size() > 4096 ||
@@ -589,7 +592,12 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                 });
                 if (!running_.load())
                     break;
-                for (const auto& packet : timelapse_packets_.at(camera)) {
+                const auto& packets = timelapse_packets_.at(camera);
+                if (detail::packet_window_overrun(delivered, packets.front().version)) {
+                    error = "timelapse packet queue overrun";
+                    break;
+                }
+                for (const auto& packet : packets) {
                     if (packet.version > delivered)
                         pending.push_back(packet);
                 }
@@ -710,6 +718,10 @@ void HttpServer::handle_client(const std::shared_ptr<Client>& client) {
                 if (!running_.load())
                     break;
                 const auto& packets = video_packets_.at(camera);
+                if (detail::packet_window_overrun(delivered, packets.front().version)) {
+                    error = "video packet queue overrun";
+                    break;
+                }
                 const auto found = std::find_if(packets.begin(), packets.end(), [&](const auto& p) {
                     return p.version > delivered;
                 });

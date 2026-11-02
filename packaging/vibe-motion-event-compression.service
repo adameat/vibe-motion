@@ -12,6 +12,7 @@ Restart=always
 RestartSec=10s
 RuntimeDirectory=vibe-motion-event-worker
 RuntimeDirectoryMode=0770
+User=motion
 Group=motion
 UMask=0007
 Nice=10

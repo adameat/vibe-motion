@@ -260,6 +260,7 @@ struct WorkerStatus {
     std::uint64_t timelapse_packets = 0;
     std::uint64_t timelapse_bytes = 0;
     std::uint64_t timelapse_keyframes = 0;
+    std::uint64_t timelapse_close_errors = 0;
     std::uint64_t timelapse_write_us_total = 0;
     std::uint64_t timelapse_write_us_last = 0;
     std::uint64_t timelapse_write_us_max = 0;
@@ -611,14 +612,14 @@ class CameraWorker {
                 if (!event.motion_topic || !event.has_state) {
                     return;
                 }
-                bool active = false;
                 {
                     std::lock_guard<std::mutex> lock(onvif_state_mutex_);
+                    bool accepted = true;
                     if (runtime_detail::onvif_topic_holds_motion_state(event.topic)) {
-                        onvif_states_.update(event.key, event.active,
-                                             std::chrono::steady_clock::now());
+                        accepted = onvif_states_.update(event.key, event.active,
+                                                        std::chrono::steady_clock::now());
                     }
-                    if (event.active) {
+                    if (event.active && accepted) {
                         if (const auto event_time = parse_onvif_utc_time(event.utc_time);
                             event_time && (!onvif_pending_trigger_time_ ||
                                            *event_time < *onvif_pending_trigger_time_)) {
@@ -627,10 +628,9 @@ class CameraWorker {
                         // Publish the generation only after its timestamp is visible.
                         onvif_trigger_generation_.fetch_add(1);
                     }
-                    active = onvif_states_.active();
+                    onvif_motion_.store(onvif_states_.active());
                 }
-                onvif_motion_.store(active);
-                set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+                set_status([&](WorkerStatus& state) { state.onvif_motion = onvif_motion_.load(); });
             },
             [this](bool connected, const std::string& error) {
                 if (!connected) {
@@ -638,8 +638,8 @@ class CameraWorker {
                         std::lock_guard<std::mutex> lock(onvif_state_mutex_);
                         onvif_states_.clear();
                         onvif_pending_trigger_time_.reset();
+                        onvif_motion_.store(false);
                     }
-                    onvif_motion_.store(false);
                 }
                 set_status([&](WorkerStatus& state) {
                     state.onvif_events_connected = connected;
@@ -664,12 +664,13 @@ class CameraWorker {
                                            std::chrono::seconds(config_.onvif_state_timeout));
             active = onvif_states_.active();
             became_inactive = was_active && !active;
+            // Serialize publication with incoming notifications and disconnects.
+            onvif_motion_.store(active);
         }
         if (expired.empty()) {
             return;
         }
-        onvif_motion_.store(active);
-        set_status([&](WorkerStatus& state) { state.onvif_motion = active; });
+        set_status([&](WorkerStatus& state) { state.onvif_motion = onvif_motion_.load(); });
         for (const auto& key : expired) {
             Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                      ": ONVIF state timed out after ", config_.onvif_state_timeout,
@@ -854,7 +855,7 @@ class CameraWorker {
         EventStateMachine events({config_.minimum_motion_frames,
                                   std::chrono::seconds(config_.event_gap), config_.post_capture,
                                   std::chrono::seconds(config_.movie_max_time)});
-        PacketRing ring(std::chrono::seconds(config_.movie_preroll), 8192);
+        PacketRing ring(std::chrono::seconds(config_.movie_preroll));
         EventMovieWriter movie;
         TimelapseWriter timelapse;
         std::filesystem::path movie_path;
@@ -1362,14 +1363,26 @@ class CameraWorker {
                             frame.captured_at, config_.timelapse_mode);
                         if (current_period != timelapse_period) {
                             std::string error;
-                            timelapse.close(&error);
+                            const bool closed = timelapse.close(&error);
+                            if (!closed) {
+                                if (error.empty())
+                                    error = "failed to flush/finalize timelapse";
+                                set_status([&](WorkerStatus& state) {
+                                    ++state.timelapse_close_errors;
+                                    state.timelapse_error = redact_secrets(error);
+                                });
+                                Logger::instance().write(
+                                    LogLevel::error, "camera ", config_.camera_id,
+                                    ": timelapse close: ", redact_secrets(error));
+                            }
                             timelapse_period = current_period;
                             auto values = context(detection, frame, events.event_number());
-                            const auto path =
+                            auto path =
                                 output_path(config_.timelapse_filename,
                                             timelapse_file_extension(config_.timelapse_container),
                                             values, frame.captured_at);
                             std::filesystem::create_directories(path.parent_path());
+                            path = runtime_detail::unused_recording_path(path);
                             const TimelapseEncodeOptions encode_options{
                                 .quality = config_.timelapse_quality,
                                 .bitrate = config_.timelapse_bitrate,
@@ -1390,7 +1403,7 @@ class CameraWorker {
                                 Logger::instance().write(
                                     LogLevel::error, "camera ", config_.camera_id,
                                     ": timelapse open: ", redact_secrets(error));
-                            } else {
+                            } else if (closed) {
                                 set_status(
                                     [](WorkerStatus& state) { state.timelapse_error.clear(); });
                             }
@@ -1478,7 +1491,16 @@ class CameraWorker {
         }
 
         std::string ignored;
-        timelapse.close(&ignored);
+        if (!timelapse.close(&ignored)) {
+            if (ignored.empty())
+                ignored = "failed to flush/finalize timelapse";
+            set_status([&](WorkerStatus& state) {
+                ++state.timelapse_close_errors;
+                state.timelapse_error = redact_secrets(ignored);
+            });
+            Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
+                                     ": timelapse close at shutdown: ", redact_secrets(ignored));
+        }
         movie.close(&ignored);
         set_status([](WorkerStatus& state) {
             state.connected = false;
@@ -1598,6 +1620,7 @@ class Application::Impl {
                    << ",\"timelapse_packets\":" << state.timelapse_packets
                    << ",\"timelapse_bytes\":" << state.timelapse_bytes
                    << ",\"timelapse_keyframes\":" << state.timelapse_keyframes
+                   << ",\"timelapse_close_errors\":" << state.timelapse_close_errors
                    << ",\"timelapse_write_us_total\":" << state.timelapse_write_us_total
                    << ",\"timelapse_write_us_last\":" << state.timelapse_write_us_last
                    << ",\"timelapse_write_us_max\":" << state.timelapse_write_us_max

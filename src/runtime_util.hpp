@@ -5,14 +5,27 @@
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace vibe_motion::runtime_detail {
+
+inline std::filesystem::path unused_recording_path(const std::filesystem::path& requested) {
+    auto candidate = requested;
+    for (std::uint64_t part = 1;
+         std::filesystem::exists(std::filesystem::symlink_status(candidate)); ++part) {
+        candidate =
+            requested.parent_path() / (requested.stem().string() + "-part" + std::to_string(part) +
+                                       requested.extension().string());
+    }
+    return candidate;
+}
 
 inline std::string lowercase_ascii(std::string_view value) {
     std::string result(value);
@@ -53,14 +66,21 @@ inline bool onvif_topic_holds_motion_state(std::string_view topic) {
 
 class OnvifStateTracker {
   public:
-    void update(std::string key, bool active, std::chrono::steady_clock::time_point now) {
+    // False permits a new assertion after the hard limit. Return false when a
+    // repeated true is suppressed, so it cannot become an edge trigger either.
+    bool update(std::string key, bool active, std::chrono::steady_clock::time_point now) {
         if (active) {
+            if (expired_.contains(key)) {
+                return false;
+            }
             // Repeated true notifications confirm the same state but do not extend its hard
             // lifetime. Only a false followed by a new true starts a fresh lease.
             active_since_.try_emplace(std::move(key), now);
         } else {
             active_since_.erase(key);
+            expired_.erase(key);
         }
+        return true;
     }
 
     std::vector<std::string> expire(std::chrono::steady_clock::time_point now,
@@ -69,6 +89,7 @@ class OnvifStateTracker {
         for (auto item = active_since_.begin(); item != active_since_.end();) {
             if (now - item->second >= timeout) {
                 expired.push_back(item->first);
+                expired_.insert(item->first);
                 item = active_since_.erase(item);
             } else {
                 ++item;
@@ -83,10 +104,12 @@ class OnvifStateTracker {
 
     void clear() noexcept {
         active_since_.clear();
+        expired_.clear();
     }
 
   private:
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> active_since_;
+    std::unordered_set<std::string> expired_;
 };
 
 inline bool auto_baichuan_open_failure_requires_reselection(std::string_view configured_transport,

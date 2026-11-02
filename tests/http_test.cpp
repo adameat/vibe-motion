@@ -1,3 +1,4 @@
+#include "http_internal.hpp"
 #include "vibe_motion/http.hpp"
 
 #include <algorithm>
@@ -123,6 +124,11 @@ static std::string get_until(std::uint16_t port, const std::string& path, const 
 }
 
 int main(int, char** argv) {
+    assert(!detail::packet_window_overrun(42, 42));
+    assert(!detail::packet_window_overrun(42, 43));
+    assert(!detail::packet_window_overrun(42, 40));
+    assert(detail::packet_window_overrun(42, 44));
+    assert(detail::packet_window_overrun(42, 5000));
     HttpServer server({"127.0.0.1", 0, 8, std::chrono::milliseconds(1000)},
                       [] { return "{\"ok\":true}"; });
     server.start();
@@ -207,6 +213,10 @@ int main(int, char** argv) {
         auto burst_packet = next_keyframe;
         for (int count = 0; count < 5; ++count) {
             assert(burst_packet != packets.end());
+            // Traffic on other cameras/stream kinds must not create a gap.
+            server.publish_timelapse_video("8", *burst_packet);
+            server.publish_video("7", *burst_packet);
+            server.publish("7", jpeg);
             server.publish_timelapse_video("7", *burst_packet);
             ++burst_packet;
         }
