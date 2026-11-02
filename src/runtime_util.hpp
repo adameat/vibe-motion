@@ -51,7 +51,9 @@ inline bool write_worker_wakeup(int descriptor) noexcept {
 inline std::filesystem::path unused_recording_path(const std::filesystem::path& requested) {
     auto candidate = requested;
     for (std::uint64_t part = 1;
-         std::filesystem::exists(std::filesystem::symlink_status(candidate)); ++part) {
+         std::filesystem::exists(std::filesystem::symlink_status(candidate)) ||
+         std::filesystem::exists(std::filesystem::symlink_status(candidate.string() + ".complete"));
+         ++part) {
         candidate =
             requested.parent_path() / (requested.stem().string() + "-part" + std::to_string(part) +
                                        requested.extension().string());

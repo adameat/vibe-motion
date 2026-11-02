@@ -249,6 +249,8 @@ static void test_hevc_outputs(const std::filesystem::path& directory) {
     std::filesystem::remove(transcoded_fragmented_path);
     std::filesystem::remove(timelapse_path);
     std::filesystem::remove(h264_timelapse_path);
+    std::filesystem::remove(timelapse_path.string() + ".complete");
+    std::filesystem::remove(h264_timelapse_path.string() + ".complete");
 
     PacketRing ring(std::chrono::seconds(10), 1000);
     EventMovieWriter event;
@@ -576,6 +578,8 @@ int main(int, char** argv) {
     for (const std::string extension : {".mkv", ".avi", ".mp4"}) {
         const auto timelapse_path = directory / ("media-timelapse" + extension);
         std::filesystem::remove(timelapse_path);
+        const auto completion_path = timelapse_path.string() + ".complete";
+        std::filesystem::remove(completion_path);
         TimelapseWriter timelapse;
         const TimelapseEncodeOptions options{
             .quality = 75,
@@ -590,10 +594,15 @@ int main(int, char** argv) {
             .x265_params = {},
         };
         assert(timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+        assert(!std::filesystem::exists(completion_path));
         for (std::size_t index = 0; index < timelapse_frames; ++index) {
             assert(timelapse.write(images[index], &error));
         }
         assert(timelapse.close(&error));
+        std::ifstream completion(completion_path);
+        const std::string completion_text{std::istreambuf_iterator<char>(completion),
+                                          std::istreambuf_iterator<char>()};
+        assert(completion_text == "vibe-motion-closed-v1\n");
         assert(std::filesystem::file_size(timelapse_path) > 1000);
         const auto stats = decoded_video_stats(timelapse_path);
         assert(stats.frames == static_cast<int>(timelapse_frames));
@@ -614,6 +623,7 @@ int main(int, char** argv) {
             // exercises close() propagating disk errors from custom AVIO.
             const auto failure_path = directory / "timelapse-close-failure.mkv";
             std::filesystem::remove(failure_path);
+            std::filesystem::remove(failure_path.string() + ".complete");
             assert(timelapse.open(failure_path.string(), 160, 120, 1, options, &error));
             assert(timelapse.write(images.front(), &error));
             struct rlimit saved_limit{};
@@ -628,6 +638,7 @@ int main(int, char** argv) {
             std::signal(SIGXFSZ, saved_handler);
             assert(restored == 0);
             assert(!closed && !error.empty());
+            assert(!std::filesystem::exists(failure_path.string() + ".complete"));
         }
     }
     source.close();

@@ -1846,6 +1846,7 @@ struct TimelapseWriter::Impl {
     std::int64_t next_pts = 0;
     bool header_written = false;
     int output_fd = -1;
+    std::string completion_path;
 
     static int write_output(void* opaque, const std::uint8_t* bytes, int size) {
         const int fd = static_cast<Impl*>(opaque)->output_fd;
@@ -1873,6 +1874,12 @@ struct TimelapseWriter::Impl {
     }
 
     int open_output(const std::string& path) {
+        completion_path = path + ".complete";
+        struct stat marker{};
+        if (::lstat(completion_path.c_str(), &marker) == 0)
+            return AVERROR(EEXIST);
+        if (errno != ENOENT)
+            return AVERROR(errno);
         // O_EXCL also rejects symlinks: a restart or colliding camera template
         // must never truncate an existing recording.
         output_fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
@@ -1941,6 +1948,7 @@ struct TimelapseWriter::Impl {
 
     bool close(std::string* error) noexcept {
         bool success = true;
+        const bool publish_completion = header_written && output_fd >= 0;
         if (format != nullptr) {
             if (encoder && header_written) {
                 int result = avcodec_send_frame(encoder.get(), nullptr);
@@ -2000,6 +2008,36 @@ struct TimelapseWriter::Impl {
         packet_stream = {};
         next_pts = 0;
         header_written = false;
+        if (success && publish_completion) {
+            // The archive worker requires this explicit closed-file handoff.
+            // Publish only after all delayed packets, trailer and file I/O
+            // succeeded, never merely because the filename is from yesterday.
+            const int marker =
+                ::open(completion_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+            int marker_error = marker < 0 ? errno : 0;
+            if (marker >= 0) {
+                constexpr char contents[] = "vibe-motion-closed-v1\n";
+                ssize_t written;
+                do {
+                    written = ::write(marker, contents, sizeof(contents) - 1);
+                } while (written < 0 && errno == EINTR);
+                if (written != static_cast<ssize_t>(sizeof(contents) - 1))
+                    marker_error = written < 0 ? errno : EIO;
+                if (::close(marker) != 0 && marker_error == 0)
+                    marker_error = errno;
+                if (marker_error != 0)
+                    ::unlink(completion_path.c_str());
+            }
+            if (marker_error != 0) {
+                success = false;
+                try {
+                    set_error(error, "cannot publish timelapse completion: " +
+                                         ff_error(AVERROR(marker_error)));
+                } catch (...) {
+                }
+            }
+        }
+        completion_path.clear();
         return success;
     }
 };

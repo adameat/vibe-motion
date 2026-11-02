@@ -43,8 +43,10 @@ class PackagingTest(unittest.TestCase):
         directory = Path(self.env["CAM_ROOT"]) / "timelapse" / "front door.1"
         directory.mkdir(parents=True)
         (directory / "movie.mkv").write_bytes(b"data")
+        (directory / "movie.mkv.complete").write_text("vibe-motion-closed-v1\n")
         output = self.run_helper("vibe-motion-storage-graphite-exporter", "--stdout")
         self.assertIn("test.timelapse.front_door_1.size ", output)
+        self.assertIn("test.timelapse_count 1 ", output)
         self.assertTrue(all(len(line.split()) == 3 for line in output.splitlines()))
 
     def test_maintenance_roots_and_both_snapshot_placeholders(self):
@@ -79,11 +81,23 @@ class PackagingTest(unittest.TestCase):
         for name in ("cam15-20261101000000.mkv", "cam15-20261031000000.mkv",
                      "cam15-20261031000000-part1.mkv"):
             (directory / name).write_bytes(b"recording")
+            (directory / (name + ".complete")).write_text("vibe-motion-closed-v1\n")
+        # A disconnected camera may retain yesterday's writer across midnight.
+        # An old date and stable bytes alone must not authorize its removal.
+        unclosed = directory / "cam15-20261031230000.mkv"
+        unclosed.write_bytes(b"buffered-tail-not-flushed-yet")
         output = self.run_helper("vibe-motion-timelapse-archive")
         self.assertIn("selected files=2 ", output)
         self.assertNotIn("would archive cam15/2026/11/cam15-20261101", output)
         self.assertIn("cam15-20261031000000-part1.mkv", output)
-        self.assertEqual(len(list(directory.iterdir())), 3)
+        self.assertNotIn("would archive cam15/2026/11/cam15-20261031230000", output)
+        self.assertEqual(len(list(directory.glob("*.mkv"))), 4)
+        # Even destructive mode must skip an unmarked file before SSH/keys.
+        for marker in directory.glob("*.complete"):
+            marker.unlink()
+        self.env["TIMELAPSE_ARCHIVE_DRY_RUN"] = "0"
+        self.assertIn("selected files=0 ", self.run_helper("vibe-motion-timelapse-archive"))
+        self.assertTrue(unclosed.exists())
 
     def test_worker_timeout(self):
         loader = importlib.machinery.SourceFileLoader("event_worker", str(PACKAGING / "vibe-motion-event-worker"))

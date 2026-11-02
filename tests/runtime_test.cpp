@@ -111,6 +111,8 @@ int main() {
     assert(first_part.filename() == "daily-part1.mkv");
     std::filesystem::create_symlink("missing", first_part);
     assert(unused_recording_path(requested).filename() == "daily-part2.mkv");
+    std::ofstream(directory / "daily-part2.mkv.complete") << "vibe-motion-closed-v1\n";
+    assert(unused_recording_path(requested).filename() == "daily-part3.mkv");
     std::filesystem::remove_all(directory);
 
     assert(auto_baichuan_open_failure_requires_reselection("auto", true, false));
