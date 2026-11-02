@@ -13,6 +13,7 @@ extern "C" {
 #include <array>
 #include <cassert>
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -21,6 +22,7 @@ extern "C" {
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
 using namespace vibe_motion;
@@ -552,12 +554,26 @@ int main(int, char** argv) {
     assert(!aligned_preroll.empty());
     assert(aligned_preroll.front().keyframe());
     assert(aligned_preroll.size() >= 16);
+    const auto first_delta =
+        std::find_if(aligned_preroll.begin(), aligned_preroll.end(),
+                     [](const VideoPacket& packet) { return !packet.keyframe(); });
+    assert(first_delta != aligned_preroll.end());
+    PacketRing high_rate_ring(std::chrono::seconds(60));
+    for (int index = 0; index <= 14400; ++index) {
+        high_rate_ring.push(
+            index % 240 == 0 ? aligned_preroll.front() : *first_delta,
+            std::chrono::steady_clock::time_point{} +
+                std::chrono::microseconds(static_cast<std::int64_t>(index) * 1000000 / 240));
+    }
+    const auto high_rate_preroll = high_rate_ring.snapshot();
+    assert(high_rate_preroll.size() == 14401);
+    assert(high_rate_preroll.front().keyframe());
     assert(movie.close(&error));
     assert(std::filesystem::file_size(movie_path) > 1000);
 
     assert(images.size() == timelapse_frame_limit);
     const auto timelapse_frames = images.size();
-    for (const std::string extension : {".mkv", ".avi"}) {
+    for (const std::string extension : {".mkv", ".avi", ".mp4"}) {
         const auto timelapse_path = directory / ("media-timelapse" + extension);
         std::filesystem::remove(timelapse_path);
         TimelapseWriter timelapse;
@@ -583,6 +599,36 @@ int main(int, char** argv) {
         assert(stats.frames == static_cast<int>(timelapse_frames));
         assert(stats.keyframes >= 2);
         assert(stats.has_color);
+        const auto original_size = std::filesystem::file_size(timelapse_path);
+        assert(!timelapse.open(timelapse_path.string(), 160, 120, 1, options, &error));
+        assert(error.find("File exists") != std::string::npos);
+        assert(std::filesystem::file_size(timelapse_path) == original_size);
+        assert(decoded_video_stats(timelapse_path).frames == stats.frames);
+        auto invalid_preset = options;
+        invalid_preset.preset = "fast";
+        assert(!timelapse.open((directory / "invalid-preset.mkv").string(), 160, 120, 1,
+                               invalid_preset, &error));
+        assert(error.find("requires libx264 or libx265") != std::string::npos);
+        if (extension == ".mkv") {
+            // Fail only the final buffered output, not encoder creation. This
+            // exercises close() propagating disk errors from custom AVIO.
+            const auto failure_path = directory / "timelapse-close-failure.mkv";
+            std::filesystem::remove(failure_path);
+            assert(timelapse.open(failure_path.string(), 160, 120, 1, options, &error));
+            assert(timelapse.write(images.front(), &error));
+            struct rlimit saved_limit{};
+            assert(::getrlimit(RLIMIT_FSIZE, &saved_limit) == 0);
+            auto limited = saved_limit;
+            limited.rlim_cur = 0;
+            const auto saved_handler = std::signal(SIGXFSZ, SIG_IGN);
+            assert(::setrlimit(RLIMIT_FSIZE, &limited) == 0);
+            error.clear();
+            const bool closed = timelapse.close(&error);
+            const int restored = ::setrlimit(RLIMIT_FSIZE, &saved_limit);
+            std::signal(SIGXFSZ, saved_handler);
+            assert(restored == 0);
+            assert(!closed && !error.empty());
+        }
     }
     source.close();
 

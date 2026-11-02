@@ -143,6 +143,7 @@ def camera_metrics(metrics, status, previous, elapsed):
         "timelapse_packets": "timelapse_packets_total",
         "timelapse_bytes": "timelapse_bytes_total",
         "timelapse_keyframes": "timelapse_keyframes_total",
+        "timelapse_close_errors": "timelapse_close_errors_total",
         "timelapse_write_us_total": "timelapse_write_us_total",
     }
     gauge_fields = {

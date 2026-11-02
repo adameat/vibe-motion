@@ -807,6 +807,9 @@ void Config::validate() const {
         check_range(c.timelapse_interval == 0 || selected_encoder != "libx265" ||
                         c.timelapse_threads <= 16,
                     c, "libx265 timelapse_threads cannot exceed 16");
+        check_range(c.timelapse_interval == 0 || c.timelapse_preset.empty() ||
+                        selected_encoder == "libx264" || selected_encoder == "libx265",
+                    c, "timelapse_preset requires libx264 or libx265");
         check_range(c.timelapse_interval == 0 || c.timelapse_pixel_format == "yuv420p" ||
                         selected_encoder == "libx265",
                     c, "timelapse_pixel_format yuv420p10le requires libx265");

@@ -45,7 +45,10 @@ class JobProcess:
             self._check_line(pending)
 
     def poll(self):
-        return self.process.poll()
+        returncode = self.process.poll()
+        # A descendant may retain stdout after the handler exits. Keep the job
+        # under its timeout instead of blocking forever in finish()/join().
+        return returncode if returncode is not None and not self.thread.is_alive() else None
 
     def timed_out(self, now, timeout):
         return self.poll() is None and now - self.started_at >= timeout
@@ -53,22 +56,26 @@ class JobProcess:
     def finish(self):
         returncode = self.process.wait()
         self.thread.join()
+        self.process.stdout.close()
         return returncode, self.processed
 
-    def terminate(self):
-        if self.process.poll() is None:
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.process.wait()
+    def terminate(self, grace=10.0):
+        deadline = time.monotonic() + grace
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            self.process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        self.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Kill surviving descendants even if the group leader already exited.
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.process.wait()
 
 
 def ensure_wake_fifo(path):

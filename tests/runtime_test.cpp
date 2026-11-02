@@ -3,7 +3,10 @@
 
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
+#include <unistd.h>
 
 using namespace vibe_motion::runtime_detail;
 
@@ -36,6 +39,15 @@ int main() {
     const auto expired = states.expire(state_start + std::chrono::hours(1), std::chrono::hours(1));
     assert(expired.size() == 1 && expired.front() == "motion");
     assert(!states.active());
+
+    // A hard-expired true is not a new edge, even if repeated indefinitely.
+    assert(!states.update("motion", true, state_start + std::chrono::hours(2)));
+    assert(!states.active());
+    assert(states.expire(state_start + std::chrono::hours(3), std::chrono::hours(1)).empty());
+    assert(states.update("motion", false, state_start + std::chrono::hours(3)));
+    assert(states.update("motion", true, state_start + std::chrono::hours(3)));
+    assert(states.active());
+    states.clear();
 
     states.update("motion", true, state_start);
     states.update("alarm", true, state_start + std::chrono::minutes(30));
@@ -72,6 +84,11 @@ int main() {
         assert(!decision.event_started);
     }
     assert(!lease_events.active());
+    // Unlike hard-expired states, a renewable state accepts the same key again
+    // without needing the missing false that this workaround is designed for.
+    assert(leases.update("motion", true, state_start + std::chrono::seconds(61), true));
+    assert(leases.active());
+    leases.update("motion", false, state_start + std::chrono::seconds(62), true);
     // Silence cannot restart an expired event, but a new smart trigger can.
     leases.update("people", true, state_start + std::chrono::seconds(70), true);
     assert(
@@ -91,6 +108,23 @@ int main() {
     }
     leases.clear();
     assert(!leases.active());
+    // Clearing a disconnected subscription also clears old tombstones.
+    states.clear();
+    assert(states.update("motion", true, state_start));
+    assert(states.active());
+
+    char temporary[] = "/tmp/vibe-runtime-test-XXXXXX";
+    const char* created = ::mkdtemp(temporary);
+    assert(created != nullptr);
+    const std::filesystem::path directory(created);
+    const auto requested = directory / "daily.mkv";
+    assert(unused_recording_path(requested) == requested);
+    std::ofstream(requested) << "original";
+    const auto first_part = unused_recording_path(requested);
+    assert(first_part.filename() == "daily-part1.mkv");
+    std::filesystem::create_symlink("missing", first_part);
+    assert(unused_recording_path(requested).filename() == "daily-part2.mkv");
+    std::filesystem::remove_all(directory);
 
     assert(auto_baichuan_open_failure_requires_reselection("auto", true, false));
     assert(!auto_baichuan_open_failure_requires_reselection("auto", true, true));

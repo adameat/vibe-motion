@@ -169,7 +169,7 @@ class NetworkCameraSource {
 class PacketRing {
   public:
     explicit PacketRing(std::chrono::milliseconds preroll = std::chrono::seconds{2},
-                        std::size_t maximum_packets = 2048);
+                        std::size_t maximum_packets = 0);
     void push(const VideoPacket& packet);
     void push(const VideoPacket& packet, std::chrono::steady_clock::time_point received_at);
     void clear() noexcept;

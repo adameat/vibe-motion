@@ -26,11 +26,14 @@ extern "C" {
 #include <climits>
 #include <cstring>
 #include <deque>
+#include <fcntl.h>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 
 namespace vibe_motion {
@@ -1084,8 +1087,13 @@ std::vector<std::uint8_t> NetworkCameraSource::render_jpeg(const DecodedImage& i
 
 PacketRing::PacketRing(std::chrono::milliseconds preroll, std::size_t maximum_packets)
     : preroll_(preroll), maximum_packets_(maximum_packets) {
-    if (preroll_.count() < 0 || maximum_packets_ == 0) {
+    if (preroll_.count() < 0 || preroll_ > std::chrono::seconds(60)) {
         throw std::invalid_argument("invalid packet ring limits");
+    }
+    if (maximum_packets_ == 0) {
+        // Budget the entire supported 240 fps window, plus the previous GOP.
+        // The time/keyframe trim still controls normal memory use.
+        maximum_packets_ = 8192 + static_cast<std::size_t>((preroll_.count() * 240 + 999) / 1000);
     }
 }
 
@@ -1837,6 +1845,50 @@ struct TimelapseWriter::Impl {
     TimelapseWriter::PacketCallback packet_callback;
     std::int64_t next_pts = 0;
     bool header_written = false;
+    int output_fd = -1;
+
+    static int write_output(void* opaque, const std::uint8_t* bytes, int size) {
+        const int fd = static_cast<Impl*>(opaque)->output_fd;
+        int offset = 0;
+        while (offset < size) {
+            const auto written =
+                ::write(fd, bytes + offset, static_cast<std::size_t>(size - offset));
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0)
+                return AVERROR(written < 0 ? errno : EIO);
+            offset += static_cast<int>(written);
+        }
+        return size;
+    }
+
+    static std::int64_t seek_output(void* opaque, std::int64_t offset, int whence) {
+        const int fd = static_cast<Impl*>(opaque)->output_fd;
+        if (whence == AVSEEK_SIZE) {
+            struct stat info{};
+            return ::fstat(fd, &info) == 0 ? info.st_size : AVERROR(errno);
+        }
+        const auto result = ::lseek(fd, offset, whence & ~AVSEEK_FORCE);
+        return result < 0 ? AVERROR(errno) : result;
+    }
+
+    int open_output(const std::string& path) {
+        // O_EXCL also rejects symlinks: a restart or colliding camera template
+        // must never truncate an existing recording.
+        output_fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        if (output_fd < 0)
+            return AVERROR(errno);
+        auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
+        if (buffer == nullptr)
+            return AVERROR(ENOMEM);
+        format->pb = avio_alloc_context(buffer, 32768, 1, this, nullptr, write_output, seek_output);
+        if (format->pb == nullptr) {
+            av_free(buffer);
+            return AVERROR(ENOMEM);
+        }
+        format->flags |= AVFMT_FLAG_CUSTOM_IO;
+        return 0;
+    }
 
     ~Impl() {
         close(nullptr);
@@ -1898,6 +1950,12 @@ struct TimelapseWriter::Impl {
                     } catch (...) {
                         success = false;
                     }
+                } else if (result != AVERROR_EOF) {
+                    success = false;
+                    try {
+                        set_error(error, "cannot flush timelapse encoder: " + ff_error(result));
+                    } catch (...) {
+                    }
                 }
                 result = av_write_trailer(format);
                 if (result < 0) {
@@ -1908,10 +1966,30 @@ struct TimelapseWriter::Impl {
                     }
                 }
             }
-            if ((format->oformat->flags & AVFMT_NOFILE) == 0 && format->pb != nullptr) {
-                avio_closep(&format->pb);
+            if (format->pb != nullptr) {
+                avio_flush(format->pb);
+                if (format->pb->error < 0) {
+                    success = false;
+                    try {
+                        set_error(error,
+                                  "cannot flush timelapse output: " + ff_error(format->pb->error));
+                    } catch (...) {
+                    }
+                }
+                av_freep(&format->pb->buffer);
+                avio_context_free(&format->pb);
             }
             avformat_free_context(format);
+        }
+        if (output_fd >= 0) {
+            if (::close(output_fd) != 0) {
+                success = false;
+                try {
+                    set_error(error, "cannot close timelapse output: " + ff_error(AVERROR(errno)));
+                } catch (...) {
+                }
+            }
+            output_fd = -1;
         }
         sws_freeContext(scaler);
         scaler = nullptr;
@@ -1959,6 +2037,10 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
     }
     if (selected_encoder == "libx265" && options.threads > 16) {
         set_error(error, "libx265 timelapse threads cannot exceed 16");
+        return false;
+    }
+    if (!options.preset.empty() && selected_encoder != "libx264" && selected_encoder != "libx265") {
+        set_error(error, "timelapse preset requires libx264 or libx265");
         return false;
     }
     int result = avformat_alloc_output_context2(&impl_->format, nullptr, nullptr, path.c_str());
@@ -2070,7 +2152,7 @@ bool TimelapseWriter::open(const std::string& path, int width, int height, int f
         impl_->stream->codecpar->codec_tag = mp4_codec_tag(codec->id);
     }
     if ((impl_->format->oformat->flags & AVFMT_NOFILE) == 0) {
-        result = avio_open(&impl_->format->pb, path.c_str(), AVIO_FLAG_WRITE);
+        result = impl_->open_output(path);
     }
     if (result >= 0) {
         result = avformat_write_header(impl_->format, nullptr);
