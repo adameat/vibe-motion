@@ -138,6 +138,7 @@ int main() {
     assert(onvif.cameras.front().events);
     assert(onvif.cameras.front().events_log);
     assert(onvif.cameras.front().onvif_state_timeout == 3600);
+    assert(onvif.cameras.front().onvif_state_ttl == 0);
     assert(!onvif.cameras.front().camera_tls_verify);
     assert(!onvif.cameras.front().motion_detection);
     assert(onvif.cameras.front().decode_frames == "auto");
@@ -154,8 +155,30 @@ int main() {
     assert(onvif_dump.find("motion_detection off") != std::string::npos);
     assert(onvif_dump.find("decode_frames auto") != std::string::npos);
     assert(onvif_dump.find("events_log on") != std::string::npos);
+    assert(onvif_dump.find("onvif_state_ttl 0") != std::string::npos);
     assert(onvif_dump.find("width auto") != std::string::npos);
     assert(onvif_dump.find("height auto") != std::string::npos);
+
+    const Config tapo = ConfigParser().parse_string(
+        "camera ../../examples/camera-tapo.conf\ncamera cameras/onvif.conf\n",
+        fixtures / "tapo-main.conf");
+    assert(tapo.cameras.size() == 2);
+    assert(tapo.cameras.front().onvif_state_ttl == 30);
+    assert(tapo.cameras.front().event_gap == 30);
+    assert(tapo.cameras.front().events_topics.find("TPSmartEvent") != std::string::npos);
+    assert(tapo.dump_effective().find("onvif_state_ttl 30") != std::string::npos);
+    assert(tapo.cameras.back().onvif_state_ttl == 0);
+    for (const std::string value : {"-1", "86401", "invalid"}) {
+        expect_config_error([&] {
+            ConfigParser().parse_string("onvif_state_ttl " + value +
+                                            "\ncamera cameras/onvif.conf\n",
+                                        fixtures / "invalid-ttl.conf");
+        });
+    }
+    const Config inherited_ttl = ConfigParser().parse_string(
+        "onvif_state_ttl 30\ncamera cameras/onvif.conf\n", fixtures / "ttl-main.conf");
+    assert(inherited_ttl.cameras.front().onvif_state_ttl == 30);
+    assert(onvif.cameras.front().onvif_state_ttl == 0);
 
     const Config baichuan =
         ConfigParser().parse_string("camera cameras/baichuan.conf\n", fixtures / "bc-main.conf");

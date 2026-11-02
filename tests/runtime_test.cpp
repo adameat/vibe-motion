@@ -1,4 +1,5 @@
 #include "runtime_util.hpp"
+#include "vibe_motion/event.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -95,6 +96,58 @@ int main() {
     states.update("alarm", false, state_start + std::chrono::hours(1));
     assert(!states.active());
 
+    // Renewable states use the last true, and false affects only its own key.
+    OnvifStateTracker leases;
+    const auto ttl = std::chrono::seconds(30);
+    leases.update("motion", true, state_start, true);
+    leases.update("motion", true, state_start + std::chrono::seconds(20), true);
+    assert(leases.expire(state_start + ttl, ttl).empty());
+    leases.update("pet", true, state_start + std::chrono::seconds(25), true);
+    leases.update("motion", false, state_start + ttl, true);
+    assert(leases.active());
+    assert(leases.expire(state_start + std::chrono::seconds(54), ttl).empty());
+    const auto expired_pet = leases.expire(state_start + std::chrono::seconds(55), ttl);
+    assert(expired_pet.size() == 1 && expired_pet.front() == "pet");
+    assert(!leases.active());
+    assert(leases.expire(state_start + std::chrono::hours(1), ttl).empty());
+
+    // Missing false: expire the state, then allow the normal 30-second tail.
+    vibe_motion::EventStateMachine lease_events({.event_gap = std::chrono::seconds(30)});
+    leases.update("motion", true, state_start, true);
+    assert(lease_events.update(leases.active(), state_start).event_started);
+    for (int second = 1; second <= 60; ++second) {
+        const auto now = state_start + std::chrono::seconds(second);
+        leases.expire(now, ttl);
+        const auto decision = lease_events.update(leases.active(), now);
+        // Last qualifying frame is at t=29, so the tail ends at t=59.
+        assert(decision.event_ended == (second == 59));
+        assert(!decision.event_started);
+    }
+    assert(!lease_events.active());
+    // Unlike hard-expired states, a renewable state accepts the same key again
+    // without needing the missing false that this workaround is designed for.
+    assert(leases.update("motion", true, state_start + std::chrono::seconds(61), true));
+    assert(leases.active());
+    leases.update("motion", false, state_start + std::chrono::seconds(62), true);
+    // Silence cannot restart an expired event, but a new smart trigger can.
+    leases.update("people", true, state_start + std::chrono::seconds(70), true);
+    assert(
+        lease_events.update(leases.active(), state_start + std::chrono::seconds(70)).event_started);
+    leases.update("people", false, state_start + std::chrono::seconds(71), true);
+    assert(
+        !lease_events.update(leases.active(), state_start + std::chrono::seconds(71)).event_ended);
+    assert(
+        lease_events.update(leases.active(), state_start + std::chrono::seconds(100)).event_ended);
+
+    // Repeated true can sustain a lease beyond the old one-hour hard limit.
+    for (int second = 0; second <= 3700; second += 10) {
+        const auto now = state_start + std::chrono::seconds(second);
+        leases.update("motion", true, now, true);
+        assert(leases.expire(now, ttl).empty());
+        assert(leases.active());
+    }
+    leases.clear();
+    assert(!leases.active());
     // Clearing a disconnected subscription also clears old tombstones.
     states.clear();
     assert(states.update("motion", true, state_start));

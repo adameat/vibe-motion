@@ -100,16 +100,20 @@ inline bool onvif_topic_holds_motion_state(std::string_view topic) {
 
 class OnvifStateTracker {
   public:
-    // False permits a new assertion after the hard limit. Return false when a
-    // repeated true is suppressed, so it cannot become an edge trigger either.
-    bool update(std::string key, bool active, std::chrono::steady_clock::time_point now) {
+    // Return false for a suppressed legacy assertion, including its edge trigger.
+    bool update(std::string key, bool active, std::chrono::steady_clock::time_point now,
+                bool renewable = false) {
         if (active) {
-            if (expired_.contains(key)) {
-                return false;
+            if (renewable) {
+                expired_.erase(key);
+                active_since_.insert_or_assign(std::move(key), State{now, true});
+            } else {
+                if (expired_.contains(key)) {
+                    return false;
+                }
+                // Preserve the legacy hard lifetime even when true notifications repeat.
+                active_since_.try_emplace(std::move(key), State{now, false});
             }
-            // Repeated true notifications confirm the same state but do not extend its hard
-            // lifetime. Only a false followed by a new true starts a fresh lease.
-            active_since_.try_emplace(std::move(key), now);
         } else {
             active_since_.erase(key);
             expired_.erase(key);
@@ -121,9 +125,10 @@ class OnvifStateTracker {
                                     std::chrono::seconds timeout) {
         std::vector<std::string> expired;
         for (auto item = active_since_.begin(); item != active_since_.end();) {
-            if (now - item->second >= timeout) {
+            if (now - item->second.asserted_at >= timeout) {
                 expired.push_back(item->first);
-                expired_.insert(item->first);
+                if (!item->second.renewable)
+                    expired_.insert(item->first);
                 item = active_since_.erase(item);
             } else {
                 ++item;
@@ -142,7 +147,11 @@ class OnvifStateTracker {
     }
 
   private:
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> active_since_;
+    struct State {
+        std::chrono::steady_clock::time_point asserted_at;
+        bool renewable = false;
+    };
+    std::unordered_map<std::string, State> active_since_;
     std::unordered_set<std::string> expired_;
 };
 
