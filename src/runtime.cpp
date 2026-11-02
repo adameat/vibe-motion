@@ -94,8 +94,7 @@ void wake_event_worker() noexcept {
     if (descriptor < 0) {
         return;
     }
-    const char wake = 'j';
-    static_cast<void>(::write(descriptor, &wake, sizeof(wake)));
+    static_cast<void>(runtime_detail::write_worker_wakeup(descriptor));
     ::close(descriptor);
 }
 
