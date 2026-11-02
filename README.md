@@ -274,6 +274,14 @@ when moving collection to another host.
 older than the current local day to a remote archive. If the daemon has a `TZ`
 override, give the archive unit the same `TZ`. Restart fragments (`-partN`) are
 eligible under the same date rule. The worker copies each file
+only if its `.complete` sidecar confirms a successful writer close. A camera
+outage across midnight therefore cannot archive an encoder that still holds
+delayed frames. The writer publishes this marker after flushing and closing the
+media file; missing/failed/crashed completions are skipped even in destructive
+mode. Pre-upgrade recordings without markers are deliberately skipped too:
+inspect and finalize those offline before opting them into archival; do not
+create markers based on age alone. The archive removes the marker with its
+verified source file. The worker copies each eligible file
 to a temporary remote name, verifies its size and SHA-256, atomically publishes
 it, and only then removes the source. It is packaged in dry-run mode: pin the
 archive host key, inspect the selected paths, and explicitly set

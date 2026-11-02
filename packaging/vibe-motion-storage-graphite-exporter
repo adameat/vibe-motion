@@ -30,7 +30,7 @@ collect_directory() {
             "$graphite_prefix" "$metric" "$entry_name" "$entry_size" "$timestamp"
     done < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
 
-    file_count=$(find "$directory" -type f -printf . | wc -c)
+    file_count=$(find "$directory" -type f ! -name '*.complete' -printf . | wc -c)
     printf '%s.%s_count %s %s\n' \
         "$graphite_prefix" "$metric" "$file_count" "$timestamp"
 }

@@ -21,6 +21,12 @@ fail() {
     exit 1
 }
 
+writer_completed() {
+    local marker="$1.complete"
+    [[ -f "$marker" && ! -L "$marker" ]] &&
+        [[ "$(< "$marker")" == "vibe-motion-closed-v1" ]]
+}
+
 [[ -d "$source_root" ]] || fail "source directory does not exist: $source_root"
 [[ "$remote_host" =~ ^[A-Za-z0-9@._:-]+$ ]] || fail "unsafe remote host"
 [[ "$remote_root" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "unsafe remote destination"
@@ -53,6 +59,10 @@ while IFS= read -r -d '' source_path; do
     fi
     file_day=${BASH_REMATCH[1]}
     [[ "$file_day" < "$today_local" ]] || continue
+    if ! writer_completed "$source_path"; then
+        log "skip without writer completion: $relative"
+        continue
+    fi
 
     printf '%s\0' "$source_path" >> "$list_file"
     selected_bytes=$((selected_bytes + $(stat -c %s -- "$source_path")))
@@ -93,6 +103,7 @@ archived_files=0
 archived_bytes=0
 while IFS= read -r -d '' source_path; do
     relative=${source_path#"$source_root"/}
+    writer_completed "$source_path" || fail "writer completion disappeared: $relative"
     remote_path="$remote_root/$relative"
     remote_dir=${remote_path%/*}
     remote_partial="${remote_path}.partial"
@@ -132,6 +143,7 @@ while IFS= read -r -d '' source_path; do
     fi
 
     rm -- "$source_path"
+    rm -- "$source_path.complete"
     archived_files=$((archived_files + 1))
     archived_bytes=$((archived_bytes + local_size))
     log "archived $relative bytes=$local_size"
