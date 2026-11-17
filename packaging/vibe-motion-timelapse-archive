@@ -94,7 +94,7 @@ ssh_options=(
 scp_options=("${ssh_options[@]}" -p -l "$bandwidth_kbit")
 
 remote_run() {
-    ssh "${ssh_options[@]}" "$remote_host" "$1"
+    ssh -n "${ssh_options[@]}" "$remote_host" "$1"
 }
 
 remote_run "test -d '$remote_root'" || fail "remote destination does not exist: $remote_root"
@@ -122,7 +122,7 @@ while IFS= read -r -d '' source_path; do
         [[ "$current_size" == "$local_size" && "$current_hash" == "$local_hash" ]] ||
             fail "source changed while checking existing destination: $relative"
     else
-        scp "${scp_options[@]}" -- "$source_path" "$remote_host:$remote_partial"
+        scp "${scp_options[@]}" -- "$source_path" "$remote_host:$remote_partial" < /dev/null
         remote_size=$(remote_run "stat -f %z '$remote_partial'")
         remote_hash=$(remote_run "sha256 -q '$remote_partial'")
         [[ "$remote_size" == "$local_size" && "$remote_hash" == "$local_hash" ]] ||
