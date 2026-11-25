@@ -283,9 +283,13 @@ std::int64_t PacketTimestampNormalizer::normalize(std::optional<std::int64_t> in
     std::int64_t output_delta = arrival_delta;
     if (input_timestamp && last_input_) {
         const std::int64_t input_delta = *input_timestamp - *last_input_;
+        // Network jitter can delay one frame and deliver the next few in a burst.
+        // Only use a late arrival to reject sub-millisecond source increments.
+        // Sustained clock drift is handled by the elapsed-time check below.
+        const auto one_millisecond = std::max<std::int64_t>(ticks_per_second_ / 1000, 1);
         const std::int64_t minimum_plausible =
             arrival_delta >= std::max<std::int64_t>(ticks_per_second_ / 100, 1)
-                ? std::max<std::int64_t>(arrival_delta / 4, 1)
+                ? std::clamp<std::int64_t>(arrival_delta / 4, 1, one_millisecond)
                 : 1;
         const std::int64_t maximum_plausible =
             std::max<std::int64_t>(ticks_per_second_ * 2, arrival_delta * 4);
