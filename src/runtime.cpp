@@ -1,4 +1,5 @@
 #include "vibe_motion/runtime.hpp"
+#include "event_processing.hpp"
 
 #include "baichuan.hpp"
 #include "runtime_util.hpp"
@@ -28,16 +29,20 @@
 #include <optional>
 #include <pthread.h>
 #include <regex>
+#include <spawn.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/wait.h>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+extern char** environ;
 
 namespace vibe_motion {
 namespace {
@@ -194,7 +199,7 @@ void write_atomic(const std::filesystem::path& path, const std::vector<std::uint
     std::filesystem::rename(temporary, path);
 }
 
-void update_lastsnap(const std::filesystem::path& snapshot) {
+void update_lastsnap(const std::filesystem::path& snapshot, bool hard_link) {
     if (snapshot.filename().string().find("lastsnap") != std::string::npos) {
         return;
     }
@@ -203,7 +208,10 @@ void update_lastsnap(const std::filesystem::path& snapshot) {
     temporary += ".tmp-" + std::to_string(::getpid());
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);
-    std::filesystem::create_symlink(snapshot.filename(), temporary, ignored);
+    if (hard_link)
+        std::filesystem::create_hard_link(snapshot, temporary, ignored);
+    else
+        std::filesystem::create_symlink(snapshot.filename(), temporary, ignored);
     if (ignored) {
         return;
     }
@@ -437,10 +445,11 @@ const char* selected_transport_name(SelectedMediaTransport transport) {
 
 class CameraWorker {
   public:
-    CameraWorker(CameraConfig config, std::filesystem::path target_dir, HookExecutor& hooks,
+    CameraWorker(CameraConfig config, const GlobalConfig& global, HookExecutor& hooks,
                  HttpServer* http, std::shared_ptr<MediaTransportLifetimeState> media_state)
-        : config_(std::move(config)), target_dir_(std::move(target_dir)), hooks_(hooks),
-          http_(http), media_state_(std::move(media_state)) {
+        : config_(std::move(config)), target_dir_(global.target_dir),
+          spool_(config_.event_processing ? event_spool(global) : std::filesystem::path{}),
+          hooks_(hooks), http_(http), media_state_(std::move(media_state)) {
         status_.effective_threshold = static_cast<std::uint64_t>(std::max(config_.threshold, 0));
         status_.effective_noise_level =
             static_cast<std::uint8_t>(std::clamp(config_.noise_level, 0, 255));
@@ -745,6 +754,20 @@ class CameraWorker {
         }
     }
 
+    void event_action(const std::string& kind, const ExpansionContext& values,
+                      std::chrono::system_clock::time_point when) {
+        if (!config_.event_processing)
+            return;
+        try {
+            if (kind == "event-start")
+                event_key_ = new_event_key();
+            queue_event_action(spool_, kind, event_key_, values, when);
+        } catch (const std::exception& error) {
+            Logger::instance().write(LogLevel::error, "camera ", config_.camera_id,
+                                     ": cannot queue ", kind, ": ", error.what());
+        }
+    }
+
     void set_status(const std::function<void(WorkerStatus&)>& update) {
         std::lock_guard<std::mutex> lock(status_mutex_);
         update(status_);
@@ -764,9 +787,10 @@ class CameraWorker {
         auto values = context(detection, frame, event_number);
         const auto path = output_path(config_.snapshot_filename, ".jpg", values, frame.captured_at);
         write_atomic(path, jpeg);
-        update_lastsnap(path);
+        update_lastsnap(path, config_.event_processing);
         values.filename = path.string();
         values.file_type = "picture";
+        event_action("snapshot", values, frame.captured_at);
         hook(config_.on_picture_save, values, frame.captured_at, "snapshot", HookPriority::normal,
              "snapshot:" + std::to_string(config_.camera_id));
     }
@@ -781,9 +805,10 @@ class CameraWorker {
         auto values = context(best_detection, best_frame, event_number);
         std::optional<ExpansionContext> picture_values;
         if (config_.picture_output && !best_jpeg.empty()) {
-            const auto picture =
-                output_path(config_.picture_filename, ".jpg", values, picture_when);
+            auto picture = output_path(config_.picture_filename, ".jpg", values, picture_when);
             try {
+                if (config_.event_processing)
+                    picture = runtime_detail::unused_recording_path(picture);
                 write_atomic(picture, best_jpeg);
                 picture_values = values;
                 picture_values->filename = picture.string();
@@ -796,16 +821,21 @@ class CameraWorker {
         std::optional<ExpansionContext> movie_values;
         if (movie.is_open()) {
             std::string error;
-            movie.close(&error);
+            const bool finalized = movie.close(&error);
             movie_values = values;
             movie_values->filename = movie_path.string();
             movie_values->file_type = "movie";
+            event_action(finalized ? "movie-end" : "movie-failed", *movie_values, end_when);
             if (!error.empty()) {
                 set_status([&](WorkerStatus& state) { state.movie_error = redact_secrets(error); });
                 Logger::instance().write(LogLevel::warning, "camera ", config_.camera_id,
                                          ": movie finalize: ", redact_secrets(error));
             }
         }
+        if (picture_values)
+            event_action("event-picture", *picture_values, picture_when);
+        event_action("event-end", values, end_when);
+        event_key_.clear();
         values.filename.clear();
         values.file_type.clear();
         hook(config_.on_event_end, values, end_when, "event-end", HookPriority::critical);
@@ -866,6 +896,13 @@ class CameraWorker {
         TimelapseWriter timelapse;
         std::filesystem::path movie_path;
         std::string timelapse_period;
+        std::filesystem::path tracked_timelapse;
+        const auto timelapse_action = [&](const std::string& kind) {
+            ExpansionContext values;
+            values.camera_id = config_.camera_id;
+            values.filename = tracked_timelapse.string();
+            event_action(kind, values, std::chrono::system_clock::now());
+        };
         std::vector<std::uint8_t> best_jpeg;
         GrayFrame best_frame;
         DetectionResult best_detection;
@@ -1285,12 +1322,15 @@ class CameraWorker {
                     const auto event_when = pending_onvif_event_time.value_or(frame.captured_at);
                     pending_onvif_event_time.reset();
                     auto values = context(detection, frame, decision.event_number);
+                    event_action("event-start", values, event_when);
                     hook(config_.on_event_start, values, event_when, "event-start",
                          HookPriority::critical);
                     if (config_.movie_output) {
                         movie_path = output_path(config_.movie_filename,
                                                  config_.movie_container == "mp4" ? ".mp4" : ".mkv",
                                                  values, event_when);
+                        if (config_.event_processing)
+                            movie_path = runtime_detail::unused_recording_path(movie_path);
                         std::filesystem::create_directories(movie_path.parent_path());
                         std::string error;
                         const VideoEncodeOptions movie_options{
@@ -1315,6 +1355,7 @@ class CameraWorker {
                                     LogLevel::warning, "camera ", config_.camera_id,
                                     ": movie preroll: ", redact_secrets(error));
                             }
+                            event_action("movie-start", values, event_when);
                             hook(config_.on_movie_start, values, event_when, "movie-start",
                                  HookPriority::critical);
                         } else {
@@ -1370,6 +1411,10 @@ class CameraWorker {
                         if (current_period != timelapse_period) {
                             std::string error;
                             const bool closed = timelapse.close(&error);
+                            if (!tracked_timelapse.empty()) {
+                                timelapse_action(closed ? "timelapse-end" : "timelapse-failed");
+                                tracked_timelapse.clear();
+                            }
                             if (!closed) {
                                 if (error.empty())
                                     error = "failed to flush/finalize timelapse";
@@ -1409,9 +1454,12 @@ class CameraWorker {
                                 Logger::instance().write(
                                     LogLevel::error, "camera ", config_.camera_id,
                                     ": timelapse open: ", redact_secrets(error));
-                            } else if (closed) {
-                                set_status(
-                                    [](WorkerStatus& state) { state.timelapse_error.clear(); });
+                            } else {
+                                tracked_timelapse = path;
+                                timelapse_action("timelapse-start");
+                                if (closed)
+                                    set_status(
+                                        [](WorkerStatus& state) { state.timelapse_error.clear(); });
                             }
                         }
                         std::string error;
@@ -1497,7 +1545,10 @@ class CameraWorker {
         }
 
         std::string ignored;
-        if (!timelapse.close(&ignored)) {
+        const bool closed_timelapse = timelapse.close(&ignored);
+        if (!tracked_timelapse.empty())
+            timelapse_action(closed_timelapse ? "timelapse-end" : "timelapse-failed");
+        if (!closed_timelapse) {
             if (ignored.empty())
                 ignored = "failed to flush/finalize timelapse";
             set_status([&](WorkerStatus& state) {
@@ -1516,6 +1567,8 @@ class CameraWorker {
 
     CameraConfig config_;
     std::filesystem::path target_dir_;
+    std::filesystem::path spool_;
+    std::string event_key_;
     HookExecutor& hooks_;
     HttpServer* http_ = nullptr;
     std::shared_ptr<MediaTransportLifetimeState> media_state_;
@@ -1540,6 +1593,10 @@ class Application::Impl {
         : config_path_(std::move(config_path)), config_(std::move(config)),
           hooks_({4, 128, std::chrono::minutes(5), std::chrono::seconds(2), "motion"}) {}
 
+    ~Impl() {
+        stop_event_worker();
+    }
+
     int run() {
         apply(config_);
         while (!stopping_.load()) {
@@ -1553,9 +1610,12 @@ class Application::Impl {
                     Logger::instance().write(LogLevel::error, "reload rejected: ", error.what());
                 }
             }
+            if (event_worker_enabled_)
+                supervise_event_worker();
             std::this_thread::sleep_for(100ms);
         }
         shutdown_workers();
+        stop_event_worker();
         if (http_) {
             http_->stop();
         }
@@ -1665,6 +1725,45 @@ class Application::Impl {
         return output.str();
     }
 
+    void supervise_event_worker() {
+        const auto now = std::chrono::steady_clock::now();
+        if (event_worker_pid_ > 0) {
+            int status{};
+            const auto result = waitpid(event_worker_pid_, &status, WNOHANG);
+            if (result == 0 || (result < 0 && errno == EINTR))
+                return;
+            Logger::instance().write(LogLevel::warning,
+                                     "event worker exited; restarting in 5 seconds");
+            event_worker_pid_ = -1;
+            next_worker_start_ = now + 5s;
+        }
+        if (now < next_worker_start_)
+            return;
+        std::string executable = "/proc/self/exe", worker = "--event-worker", flag = "-c";
+        auto path = config_path_.string(), parent = std::to_string(getpid());
+        std::string parent_flag = "--worker-parent";
+        char* args[] = {executable.data(),  worker.data(), flag.data(), path.data(),
+                        parent_flag.data(), parent.data(), nullptr};
+        pid_t child{};
+        const int error = posix_spawn(&child, executable.c_str(), nullptr, nullptr, args, environ);
+        if (error) {
+            Logger::instance().write(LogLevel::error,
+                                     "cannot start event worker: ", std::strerror(error));
+            next_worker_start_ = now + 5s;
+        } else {
+            event_worker_pid_ = child;
+        }
+    }
+
+    void stop_event_worker() {
+        if (event_worker_pid_ <= 0)
+            return;
+        kill(event_worker_pid_, SIGTERM);
+        while (waitpid(event_worker_pid_, nullptr, 0) < 0 && errno == EINTR) {
+        }
+        event_worker_pid_ = -1;
+    }
+
     void shutdown_workers() {
         std::lock_guard<std::mutex> workers_lock(workers_mutex_);
         for (auto& worker : workers_) {
@@ -1695,7 +1794,13 @@ class Application::Impl {
             http_->stop();
             http_.reset();
         }
+        stop_event_worker();
         config_ = std::move(replacement);
+        event_worker_enabled_ = !config_.global.event_worker_camera_ids.empty() ||
+                                std::any_of(config_.cameras.begin(), config_.cameras.end(),
+                                            [](const auto& c) { return c.event_processing; });
+        next_worker_start_ = {};
+
         if (config_.global.webcontrol_port > 0) {
             HttpServerOptions options;
             options.bind_address = config_.global.webcontrol_localhost ? "127.0.0.1" : "0.0.0.0";
@@ -1706,7 +1811,7 @@ class Application::Impl {
         media_lifetimes_ = std::move(replacement_media_lifetimes);
         for (const auto& camera : config_.cameras) {
             const auto media_state = media_lifetimes_.at(camera.camera_id).state;
-            auto worker = std::make_unique<CameraWorker>(camera, config_.global.target_dir, hooks_,
+            auto worker = std::make_unique<CameraWorker>(camera, config_.global, hooks_,
                                                          http_.get(), media_state);
             worker->start();
             {
@@ -1719,6 +1824,9 @@ class Application::Impl {
 
     std::filesystem::path config_path_;
     Config config_;
+    bool event_worker_enabled_ = false;
+    pid_t event_worker_pid_ = -1;
+    std::chrono::steady_clock::time_point next_worker_start_;
     HookExecutor hooks_;
     std::unique_ptr<HttpServer> http_;
     mutable std::mutex workers_mutex_;

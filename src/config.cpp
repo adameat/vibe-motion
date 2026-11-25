@@ -1,4 +1,5 @@
 #include "vibe_motion/config.hpp"
+#include "vibe_motion/hooks.hpp"
 #include "vibe_motion/media.hpp"
 
 #include <algorithm>
@@ -325,6 +326,30 @@ ApplyResult apply_camera(CameraConfig& c, const std::string& original_key, const
         c.locate_motion_mode = lower(trim(value));
     else if (key == "locate_motion_style")
         c.locate_motion_style = lower(trim(value));
+    else if (key == "event_processing")
+        c.event_processing = boolean(value, location, key);
+    else if (key == "event_video_options")
+        c.event_video_options = unquote(value);
+    else if (key == "event_compression")
+        c.event_compression = boolean(value, location, key);
+    else if (key == "event_snapshot_width")
+        c.event_snapshot_width = integer(value, location, key);
+    else if (key == "event_thumbnail_width")
+        c.event_thumbnail_width = integer(value, location, key);
+    else if (key == "event_telegram")
+        c.event_telegram = boolean(value, location, key);
+    else if (key == "telegram_token_file")
+        c.telegram_token_file = unquote(value);
+    else if (key == "telegram_api_url")
+        c.telegram_api_url = unquote(value);
+    else if (key == "telegram_chat_id")
+        c.telegram_chat_id = unquote(value);
+    else if (key == "event_timezone")
+        c.event_timezone = unquote(value);
+    else if (key == "event_link_prefix")
+        c.event_link_prefix = unquote(value);
+    else if (key == "event_retention_days")
+        c.event_retention_days = integer(value, location, key);
     else if (key == "on_event_start")
         c.on_event_start = value;
     else if (key == "on_event_end")
@@ -373,7 +398,24 @@ ApplyResult apply_global(GlobalConfig& g, const std::string& key, const std::str
         g.watchdog_tmo = integer(value, location, key);
     else if (key == "watchdog_kill")
         g.watchdog_kill = integer(value, location, key);
-    else if (key == "target_dir")
+    else if (key == "event_db_options_file")
+        g.event_db_options_file = unquote(value);
+    else if (key == "event_database")
+        g.event_database = unquote(value);
+    else if (key == "event_spool_dir")
+        g.event_spool_dir = unquote(value);
+    else if (key == "telegram_updates_per_minute")
+        g.telegram_updates_per_minute = integer(value, location, key);
+    else if (key == "event_worker_camera_ids") {
+        g.event_worker_camera_ids.clear();
+        std::istringstream input(unquote(value));
+        for (std::string id; std::getline(input, id, ',');) {
+            const auto number = integer(id, location, key);
+            if (number <= 0)
+                throw ConfigError(location + ": invalid event_worker_camera_ids");
+            g.event_worker_camera_ids.push_back(number);
+        }
+    } else if (key == "target_dir")
         g.target_dir = unquote(value);
     else if (key == "webcontrol_port")
         g.webcontrol_port = integer(value, location, key);
@@ -594,6 +636,18 @@ void dump_camera(std::ostringstream& out, const CameraConfig& c, bool redact) {
         << "timelapse_x265_params " << c.timelapse_x265_params << '\n'
         << "locate_motion_mode " << c.locate_motion_mode << '\n'
         << "locate_motion_style " << c.locate_motion_style << '\n'
+        << "event_processing " << bool_text(c.event_processing) << '\n'
+        << "event_video_options " << c.event_video_options << '\n'
+        << "event_compression " << bool_text(c.event_compression) << '\n'
+        << "event_snapshot_width " << c.event_snapshot_width << '\n'
+        << "event_thumbnail_width " << c.event_thumbnail_width << '\n'
+        << "event_telegram " << bool_text(c.event_telegram) << '\n'
+        << "telegram_token_file " << c.telegram_token_file << '\n'
+        << "telegram_api_url " << c.telegram_api_url << '\n'
+        << "telegram_chat_id " << c.telegram_chat_id << '\n'
+        << "event_timezone " << c.event_timezone << '\n'
+        << "event_link_prefix " << c.event_link_prefix << '\n'
+        << "event_retention_days " << c.event_retention_days << '\n'
         << "on_event_start " << c.on_event_start << '\n'
         << "on_event_end " << c.on_event_end << '\n'
         << "on_picture_save " << c.on_picture_save << '\n'
@@ -680,9 +734,41 @@ void Config::validate() const {
     if (global.webcontrol_parms != 0) {
         throw ConfigError("only read-only webcontrol_parms 0 is supported");
     }
+    if (global.telegram_updates_per_minute < 0)
+        throw ConfigError("telegram_updates_per_minute must be non-negative");
+    auto validate_processing = [&](const CameraConfig& c) {
+        check_range(
+            !global.event_database.empty() &&
+                std::filesystem::path(global.event_db_options_file).is_absolute(),
+            c, "event_processing requires event_database and an absolute event_db_options_file");
+        check_range(global.event_spool_dir.empty() || global.event_spool_dir.is_absolute(), c,
+                    "event_spool_dir must be absolute");
+        check_range(c.event_retention_days >= -1, c,
+                    "event_retention_days must be -1, zero, or positive");
+        check_range(c.event_snapshot_width > 0 && c.event_thumbnail_width > 0, c,
+                    "event image widths must be positive");
+        check_range(c.telegram_token_file.empty() ||
+                        std::filesystem::path(c.telegram_token_file).is_absolute(),
+                    c, "telegram_token_file must be absolute");
+        check_range((c.telegram_api_url.starts_with("https://") ||
+                     c.telegram_api_url.starts_with("http://")) &&
+                        c.telegram_api_url.find_first_of("?#@") == std::string::npos,
+                    c, "invalid telegram_api_url");
+        if (!c.event_video_options.empty()) {
+            try {
+                (void)parse_hook_command(c.event_video_options);
+            } catch (const std::invalid_argument&) {
+                throw ConfigError("invalid quoting in event_video_options");
+            }
+        }
+    };
+    if (!global.event_worker_camera_ids.empty())
+        validate_processing(global.camera_defaults);
     std::set<int> ids;
     std::set<std::string> names;
     for (const CameraConfig& c : cameras) {
+        if (c.event_processing)
+            validate_processing(c);
         check_range(c.camera_id > 0, c, "camera_id must be positive");
         check_range(!trim(c.camera_name).empty(), c, "camera_name is required");
         check_range(ids.insert(c.camera_id).second, c, "duplicate camera_id");
@@ -843,6 +929,14 @@ std::string Config::dump_effective(bool redact) const {
         << "log_type " << global.log_type << '\n'
         << "watchdog_tmo " << global.watchdog_tmo << '\n'
         << "watchdog_kill " << global.watchdog_kill << '\n'
+        << "event_db_options_file " << global.event_db_options_file << '\n'
+        << "event_database " << global.event_database << '\n'
+        << "event_spool_dir " << global.event_spool_dir.string() << '\n'
+        << "telegram_updates_per_minute " << global.telegram_updates_per_minute << '\n'
+        << "event_worker_camera_ids ";
+    for (std::size_t i = 0; i < global.event_worker_camera_ids.size(); ++i)
+        out << (i ? "," : "") << global.event_worker_camera_ids[i];
+    out << '\n'
         << "target_dir " << global.target_dir.string() << '\n'
         << "webcontrol_port " << global.webcontrol_port << '\n'
         << "webcontrol_localhost " << bool_text(global.webcontrol_localhost) << '\n'

@@ -1,3 +1,4 @@
+#include "event_processing.hpp"
 #include "vibe_motion/config.hpp"
 #include "vibe_motion/hooks.hpp"
 #include "vibe_motion/log.hpp"
@@ -17,6 +18,7 @@ extern "C" {
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <sys/prctl.h>
 #include <thread>
 #include <unistd.h>
 
@@ -39,6 +41,7 @@ void handle_signal(int signal) {
 void usage(std::ostream& output) {
     output << "usage: vibe-motion [-n] [-c FILE] [--check-config] [--strict-config] "
               "[--dump-effective-config]\n"
+              "       vibe-motion -c FILE --event-worker\n"
               "       vibe-motion --version\n";
 }
 
@@ -65,6 +68,7 @@ int main(int argc, char** argv) try {
     bool check_config = false;
     bool dump_config = false;
     bool strict_config = false;
+    bool event_worker = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
@@ -78,6 +82,15 @@ int main(int argc, char** argv) try {
             dump_config = true;
         } else if (argument == "--strict-config") {
             strict_config = true;
+        } else if (argument == "--event-worker") {
+            event_worker = true;
+        } else if (argument == "--worker-parent" && index + 1 < argc) {
+            const int parent = std::stoi(argv[++index]);
+            if (!event_worker || parent <= 1 || prctl(PR_SET_PDEATHSIG, SIGTERM) != 0)
+                throw std::runtime_error("invalid event worker parent");
+            if (getppid() != parent)
+                return 0;
+            (void)nice(10);
         } else if (argument == "--version") {
             std::cout << "vibe-motion 0.1.0 (libavformat " << LIBAVFORMAT_VERSION_MAJOR
                       << ", libavcodec " << LIBAVCODEC_VERSION_MAJOR << ", libavutil "
@@ -104,7 +117,8 @@ int main(int argc, char** argv) try {
         return 0;
     }
 
-    if (!foreground && config.global.daemon) {
+    config_path = std::filesystem::absolute(config_path);
+    if (!event_worker && !foreground && config.global.daemon) {
         if (::daemon(0, 0) != 0) {
             throw std::runtime_error("failed to enter daemon mode");
         }
@@ -119,6 +133,9 @@ int main(int argc, char** argv) try {
         vibe_motion::Logger::instance().set_file(config.global.log_file);
     }
 
+    if (event_worker) {
+        return vibe_motion::run_event_worker(config);
+    }
     vibe_motion::Application app(config_path, std::move(config));
     application.store(&app, std::memory_order_relaxed);
     std::signal(SIGINT, handle_signal);
