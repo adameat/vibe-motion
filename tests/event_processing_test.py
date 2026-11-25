@@ -184,8 +184,8 @@ camera camera.conf
 
     stop(worker)
 
-    # Resume a conversion queued by the old worker, process one matching
-    # external picture, and expire a worker-only camera with delivery disabled.
+    # Resume a conversion queued by the old worker, process external
+    # pictures across midnight, and expire a worker-only camera with delivery disabled.
     original = Path(sql("SELECT path FROM files WHERE type='motion.movie'"))
     source = root / "legacy movie.mkv"
     shutil.copyfile(original, source)
@@ -196,11 +196,20 @@ camera camera.conf
     external = root / "ext" / "cam1" / stamp.strftime("%Y/%m/%d") / stamp.strftime("upload_cam_%Y%m%d%H%M%S.jpg")
     external.parent.mkdir(parents=True)
     shutil.copyfile(root / "snapshot" / "cam01" / "lastsnaps.jpg", external)
+    # Camera 13 uploaded just before midnight. Its event closed after midnight,
+    # while the worker was stopped; there is no upload directory for today.
+    midnight = stamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    previous = midnight - datetime.timedelta(seconds=1)
+    late_upload = (root / "ext" / "cam13" / previous.strftime("%Y/%m/%d")
+                   / previous.strftime("upload_cam_%Y%m%d%H%M%S.jpg"))
+    late_upload.parent.mkdir(parents=True)
+    late_upload.write_bytes(b"previous day's upload")
     sql(f"""
-        INSERT INTO cams(id,max_event_days) VALUES(13,1);
+        INSERT INTO cams(id,max_event_days,last_external) VALUES(13,1,'{midnight}');
         INSERT INTO events(id,cam_id,start_time,end_time) VALUES
             (10,1,now()-INTERVAL 1 HOUR,now()-INTERVAL 59 MINUTE),
-            (11,13,now()-INTERVAL 3 DAY,now()-INTERVAL 3 DAY);
+            (11,13,now()-INTERVAL 3 DAY,now()-INTERVAL 3 DAY),
+            (12,13,'{previous}','{midnight}');
         INSERT INTO files VALUES
             (10,'motion.movie','{source}','ok'), (10,'media.video','{encoded}','converting'),
             (11,'motion.picture','{retired}','ok');
@@ -214,7 +223,12 @@ camera camera.conf
     start("--event-worker")
     until(lambda: sql("SELECT count(*) FROM jobs") == "0")
     until(lambda: sql("SELECT count(*) FROM events WHERE id=11") == "0")
-    until(lambda: sql("SELECT count(*) FROM files WHERE type='external.picture'") == "1")
+    until(lambda: sql("SELECT count(*) FROM files WHERE type='external.picture'") == "2")
+    destination = (root / "events" / "cam13" / previous.strftime("%Y/%m")
+                   / previous.strftime("cam13-%Y%m%d%H%M%S-ext.jpg"))
+    assert sql("SELECT path FROM files WHERE event_id=12 AND type='external.picture'") == str(destination)
+    assert destination.read_bytes() == b"previous day's upload" and not late_upload.exists()
+    assert sql("SELECT last_external FROM cams WHERE id=13") == str(midnight)
     assert encoded.stat().st_size and not retired.exists() and not external.exists()
     assert len(attempts) == sent
 

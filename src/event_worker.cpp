@@ -7,6 +7,7 @@
 #include <csignal>
 #include <curl/curl.h>
 #include <fcntl.h>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <spawn.h>
@@ -347,18 +348,11 @@ bool convert(Database& db, const CameraConfig& camera, const Path& root) {
     return true;
 }
 
-void scan_external(Database& db, const CameraConfig& camera, const Path& root,
-                   const Row& settings) {
-    auto now = std::time(nullptr);
-    std::tm local{};
-    localtime_r(&now, &local);
-    std::ostringstream day;
-    day << std::put_time(&local, "%Y/%m/%d");
-    auto cam = std::to_string(camera.camera_id);
-    auto base = settings.at("file_path").empty() ? root : Path(settings.at("file_path"));
-    auto dir = media_path(root, base / "ext" / ("cam" + cam) / day.str());
+std::string scan_external_day(Database& db, const Path& root, const Path& base,
+                              const std::string& cam, const std::string& day) {
+    auto dir = media_path(root, base / "ext" / ("cam" + cam) / day);
     if (!std::filesystem::is_directory(dir))
-        return;
+        return {};
     std::string latest;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (stopping || !entry.is_regular_file() || entry.is_symlink())
@@ -383,7 +377,7 @@ void scan_external(Database& db, const CameraConfig& camera, const Path& root,
             continue;
         auto label = "cam" + (cam.size() == 1 ? "0" + cam : cam);
         auto dest =
-            media_path(root, base / "events" / label / day.str().substr(0, 7) /
+            media_path(root, base / "events" / label / day.substr(0, 7) /
                                  (label + "-" + stamp + "-ext" + file.extension().string()));
         std::filesystem::create_directories(dest.parent_path());
         // Retain the source until the database acknowledges the destination.
@@ -405,9 +399,27 @@ void scan_external(Database& db, const CameraConfig& camera, const Path& root,
                     file.extension() == ".jpg" ? "external.picture" : "external.movie", dest, "ok");
         std::filesystem::remove(file);
     }
+    return latest;
+}
+
+void scan_external(Database& db, const CameraConfig& camera, const Path& root,
+                   const Row& settings) {
+    using namespace std::chrono;
+    auto now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    const local_days today{year(local.tm_year + 1900) / (local.tm_mon + 1) / local.tm_mday};
+    const auto cam = std::to_string(camera.camera_id);
+    const auto base = settings.at("file_path").empty() ? root : Path(settings.at("file_path"));
+    std::string latest;
+    for (const auto day : {today - days{1}, today}) {
+        latest = std::max(latest,
+                          scan_external_day(db, root, base, cam, std::format("{:%Y/%m/%d}", day)));
+    }
     if (!latest.empty())
-        db.query("UPDATE cams SET last_external=STR_TO_DATE(?,'%Y%m%d%H%i%s')-INTERVAL 120 MINUTE "
-                 "WHERE id=?",
+        db.query("UPDATE cams JOIN (SELECT STR_TO_DATE(?,'%Y%m%d%H%i%s')-INTERVAL 120 MINUTE "
+                 "AS cutoff) AS scan SET last_external=scan.cutoff WHERE id=? AND "
+                 "(last_external IS NULL OR last_external<scan.cutoff)",
                  {latest, cam});
 }
 } // namespace
