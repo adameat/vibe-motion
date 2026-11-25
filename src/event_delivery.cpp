@@ -284,9 +284,12 @@ void expire_event(Database& db, const CameraConfig& camera, const Path& root, co
                                                       : std::to_string(camera.event_retention_days);
     if (days.empty() || std::stoi(days) <= 0)
         return;
-    auto event = db.one("SELECT id,message_id FROM events WHERE cam_id=? AND "
-                        "start_time<now()-INTERVAL ? DAY ORDER BY start_time LIMIT 1",
-                        {std::to_string(camera.camera_id), days});
+    const auto cam = std::to_string(camera.camera_id);
+    const std::string expired =
+        "SELECT e.id,e.message_id FROM events e WHERE e.cam_id=? AND "
+        "e.start_time<now()-INTERVAL ? DAY AND e.end_time IS NOT NULL AND "
+        "NOT EXISTS(SELECT 1 FROM files f WHERE f.event_id=e.id AND f.status='writing')";
+    auto event = db.one(expired + " ORDER BY e.start_time LIMIT 1", {cam, days});
     if (event.empty())
         return;
     auto id = event.at("id");
@@ -296,7 +299,7 @@ void expire_event(Database& db, const CameraConfig& camera, const Path& root, co
     AdvisoryLock media_lock(db, "motion.convert_event." + id);
     if (!media_lock)
         return;
-    event = db.one("SELECT message_id FROM events WHERE id=?", {id});
+    event = db.one(expired + " AND e.id=?", {cam, days, id});
     if (event.empty())
         return;
     if (camera.event_telegram) {

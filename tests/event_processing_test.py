@@ -192,6 +192,10 @@ camera camera.conf
     encoded = root / "legacy movie-video.mp4"
     retired = root / "retired.jpg"
     retired.write_bytes(b"old")
+    active_picture = root / "active-event.jpg"
+    active_picture.write_bytes(b"open event")
+    writing_movie = root / "still-writing.mkv"
+    writing_movie.write_bytes(b"recording")
     stamp = datetime.datetime.now()
     external = root / "ext" / "cam1" / stamp.strftime("%Y/%m/%d") / stamp.strftime("upload_cam_%Y%m%d%H%M%S.jpg")
     external.parent.mkdir(parents=True)
@@ -209,10 +213,14 @@ camera camera.conf
         INSERT INTO events(id,cam_id,start_time,end_time) VALUES
             (10,1,now()-INTERVAL 1 HOUR,now()-INTERVAL 59 MINUTE),
             (11,13,now()-INTERVAL 3 DAY,now()-INTERVAL 3 DAY),
-            (12,13,'{previous}','{midnight}');
+            (12,13,'{previous}','{midnight}'),
+            (13,13,now()-INTERVAL 5 DAY,NULL),
+            (14,13,now()-INTERVAL 4 DAY,now()-INTERVAL 3 DAY);
         INSERT INTO files VALUES
             (10,'motion.movie','{source}','ok'), (10,'media.video','{encoded}','converting'),
-            (11,'motion.picture','{retired}','ok');
+            (11,'motion.picture','{retired}','ok'),
+            (13,'motion.picture','{active_picture}','ok'),
+            (14,'motion.movie','{writing_movie}','writing');
         INSERT INTO jobs(command,touch_event_id,touch_file_type,sender,status)
             VALUES('obsolete encoder command',10,'media.video','{network_socket.gethostname().split('.')[0]}','new');
     """)
@@ -222,7 +230,12 @@ camera camera.conf
     sent = len(attempts)
     start("--event-worker")
     until(lambda: sql("SELECT count(*) FROM jobs") == "0")
-    until(lambda: sql("SELECT count(*) FROM events WHERE id=11") == "0")
+    # The two oldest events are ineligible. Maintenance should skip both
+    # and remove the next expired event in the same pass.
+    until(lambda: sql("SELECT count(*) FROM events WHERE id IN (11,13,14)") == "2")
+    assert sql("SELECT id FROM events WHERE id IN (11,13,14) ORDER BY id").splitlines() == ["13", "14"]
+    assert sql("SELECT status FROM files WHERE event_id=14") == "writing"
+    assert active_picture.exists() and writing_movie.exists()
     until(lambda: sql("SELECT count(*) FROM files WHERE type='external.picture'") == "2")
     destination = (root / "events" / "cam13" / previous.strftime("%Y/%m")
                    / previous.strftime("cam13-%Y%m%d%H%M%S-ext.jpg"))
