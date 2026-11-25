@@ -256,7 +256,11 @@ SoapResponse post_soap_once(const OnvifClientConfig& config, const std::string& 
     char error_buffer[CURL_ERROR_SIZE]{};
     curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
     curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http,https");
+#else
     curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
     curl_easy_setopt(curl.get(), CURLOPT_NOPROXY, "*");
     curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, document.data());
