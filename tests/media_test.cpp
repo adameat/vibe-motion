@@ -60,6 +60,19 @@ static void test_packet_timestamp_normalization() {
     assert(timestamps.normalize(3000, 2900) == 3000);
     assert(timestamps.normalize(6000, 6100) == 6000);
 
+    // A delayed keyframe and the packets queued behind it retain camera time.
+    timestamps.reset(90000);
+    std::int64_t source_time = 0;
+    std::int64_t arrival_time = 0;
+    assert(timestamps.normalize(source_time, arrival_time) == 0);
+    for (int frame = 1; frame <= 125; ++frame) {
+        // Include a real two-frame interval in the camera timestamps.
+        source_time += frame == 73 ? 12000 : 6000;
+        const auto delay = frame % 30 == 0 ? 31500 : 0;
+        arrival_time = std::max(arrival_time + 90, source_time + delay);
+        assert(timestamps.normalize(source_time, arrival_time) == source_time);
+    }
+
     timestamps.reset(90000);
     assert(timestamps.normalize(100000, 0) == 0);
     assert(timestamps.normalize(103000, 3000) == 3000);
