@@ -67,6 +67,9 @@ endif()
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(LibXml2 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_search_module(EVENT_DB REQUIRED IMPORTED_TARGET mysqlclient libmariadb)
+pkg_check_modules(JSON_C REQUIRED IMPORTED_TARGET json-c)
 
 set(VIBE_CLANG_WARNINGS
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wextra-semi
@@ -95,6 +98,9 @@ add_library(vibe_motion_core
   src/config.cpp
   src/decode.cpp
   src/detection.cpp
+  src/event_delivery.cpp
+  src/event_worker.cpp
+  src/event_spool.cpp
   src/event.cpp
   src/media.cpp
   src/hooks.cpp
@@ -107,6 +113,8 @@ target_link_libraries(vibe_motion_core PUBLIC Threads::Threads
   CURL::libcurl LibXml2::LibXml2
   "${FFMPEG_AVFORMAT_LIBRARY}" "${FFMPEG_AVCODEC_LIBRARY}"
   "${FFMPEG_AVUTIL_LIBRARY}" "${FFMPEG_SWSCALE_LIBRARY}")
+set_source_files_properties(src/event_delivery.cpp PROPERTIES COMPILE_OPTIONS "-fexperimental-library")
+target_link_libraries(vibe_motion_core PRIVATE PkgConfig::EVENT_DB PkgConfig::JSON_C c++experimental)
 if(VIBE_ENABLE_BAICHUAN)
   target_sources(vibe_motion_core PRIVATE src/baichuan.cpp)
   target_compile_definitions(vibe_motion_core PRIVATE VIBE_ENABLE_BAICHUAN=1)
@@ -137,7 +145,8 @@ install(PROGRAMS packaging/vibe-motion-storage-graphite-exporter
   DESTINATION libexec)
 install(PROGRAMS packaging/vibe-motion-timelapse-archive
   DESTINATION libexec)
-install(FILES packaging/vibe-motion-event-compression.service
+install(FILES packaging/vibe-motion-event-processor.service
+  packaging/vibe-motion-event-compression.service
   packaging/vibe-motion-media-maintenance.service
   packaging/vibe-motion-media-maintenance.timer
   packaging/vibe-motion-storage-graphite.service
@@ -184,6 +193,8 @@ if(VIBE_BUILD_TESTS)
   target_include_directories(http_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME event_processing COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event_processing_test.py" $<TARGET_FILE:vibe-motion>)
+    set_tests_properties(event_processing PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     add_test(NAME packaging COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/packaging_test.py")
   endif()
   target_include_directories(media_test SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")

@@ -102,6 +102,19 @@ struct CameraConfig {
     std::string locate_motion_mode = "off";
     std::string locate_motion_style = "box";
 
+    bool event_processing = false;
+    std::string event_video_options;
+    bool event_compression = true;
+    int event_snapshot_width = 480;
+    int event_thumbnail_width = 90;
+    bool event_telegram = false;
+    std::string telegram_token_file;
+    std::string telegram_chat_id;
+    std::string telegram_api_url = "https://api.telegram.org";
+    std::string event_timezone;
+    std::string event_link_prefix;
+    int event_retention_days = -1;
+
     std::string on_event_start;
     std::string on_event_end;
     std::string on_picture_save;
@@ -137,6 +150,11 @@ struct GlobalConfig {
     std::string webcontrol_authentication;
     int stream_preview_scale = 25;
     std::string stream_preview_method = "mjpg";
+    std::string event_db_options_file;
+    std::string event_database;
+    std::filesystem::path event_spool_dir;
+    std::vector<int> event_worker_camera_ids;
+    int telegram_updates_per_minute = 15;
     CameraConfig camera_defaults;
     OptionMap unknown_options;
 };

@@ -6,13 +6,15 @@ compatibility target covers RTMP/RTSP input, motion masks and event grouping,
 snapshots, best event pictures, passthrough event movies, hourly or daily timelapse,
 hooks, and an integrated MJPEG/status HTTP server.
 
-It deliberately does **not** support local V4L2/libcamera devices or databases.
+The daemon accepts network camera inputs. The optional event processor uses MySQL.
 Unknown Motion options are reported; `--check-config` can be used before a
 service migration.
 
 ## Build
 
-The daemon requires Clang 22, libcurl and libxml2 development headers, and a coherent
+The daemon requires Clang 22 with libc++ experimental timezone support, pkg-config,
+the development packages for libcurl, libxml2, json-c, and a MySQL client
+(mysqlclient or MariaDB Connector/C), and a coherent
 FFmpeg development installation containing `libavformat`, `libavcodec`, `libavutil`, and
 `libswscale`. Native Baichuan input is enabled by default and uses the cryptographic
 primitives already supplied by `libavutil`. On this development host the FFmpeg
@@ -58,8 +60,7 @@ the configuration by replacing camera workers only after the new graph parses
 successfully. Network URLs are redacted from logs and config dumps.
 
 The web listener serves a small status page and JSON status plus Motion-style
-MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It is read-only; mutating
-Motion web control actions and database features are out of scope. The JSON
+MJPEG routes such as `/1/mjpg` and `/1/mjpg/stream`. It serves read-only status and media. The JSON
 includes shared hook-executor health and counters (`pending`, `running`,
 `submitted`, `completed`, `timed_out`, `failed`, `dropped`, `coalesced`,
 `backpressure`, and supervisor restart/error state). The
@@ -246,6 +247,12 @@ installed with its companion systemd service and timer. It exports process and
 named-thread CPU, per-camera input/output byte counters, successful timelapse
 frames, and timelapse write latency without changing camera, movie, event, or
 encoder settings.
+
+Event compression, Telegram live updates and final videos, snapshot thumbnails,
+and event retention are included in every build. Set `event_processing on` for
+the cameras to process. The recorder automatically starts and supervises the
+event worker, which uses the existing MySQL event database. See the
+[settings and pearl migration procedure](docs/event-processing.md).
 
 Existing deployments that queue event-video conversion through
 `/etc/motion/motion.py` can run that queue locally with

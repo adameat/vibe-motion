@@ -1,0 +1,27 @@
+[Unit]
+Description=vibe-motion event media and Telegram worker
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/cam
+
+[Service]
+Type=simple
+User=motion
+Group=motion
+UMask=0002
+ExecStart=/usr/local/bin/vibe-motion --event-worker -c /etc/vibe-motion/motion.conf
+Restart=on-failure
+RestartSec=5s
+Nice=10
+CPUQuota=100%
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/cam /var/log/motion
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target
